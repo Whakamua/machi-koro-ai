@@ -2,169 +2,203 @@ Wheat Field:
   n_cards: 6
   cost: 1
   activation: [1,1]
+  icon: Grain
   type: Primary Industry
 Ranch:
   n_cards: 6
   cost: 1
   activation: [2,2]
+  icon: Cow
   type: Primary Industry
 Flower Orchard:
   n_cards: 6
   cost: 2
   activation: [4,4]
+  icon: Grain
   type: Primary Industry
 Forest:
   n_cards: 6
   cost: 3
   activation: [5,5]
+  icon: Gear
   type: Primary Industry
 Mackerel Boat:
   n_cards: 6
   cost: 2
   activation: [8,8]
+  icon: Boat
   type: Primary Industry
 Apple Orchard:
   n_cards: 6
   cost: 3
   activation: [10,10]
+  icon: Grain
   type: Primary Industry
 Tuna Boat:
   n_cards: 6
   cost: 5
-  activation: [12,14]
+  activation: [12,12] #[12,14]
+  icon: Boat
   type: Primary Industry
 General Store:
   n_cards: 6
   cost: 0
   activation: [2,2]
+  icon: Bread
   type: Secondary Industry
 Bakery:
   n_cards: 6
   cost: 1
   activation: [2,3]
+  icon: Bread
   type: Secondary Industry
 Demolition Company:
   n_cards: 6
   cost: 2
   activation: [4,4]
+  icon: Suitcase
   type: Secondary Industry
 Flower Shop:
   n_cards: 6
   cost: 1
   activation: [6,6]
+  icon: Bread
   type: Secondary Industry
 Cheese Factory:
   n_cards: 6
   cost: 5
   activation: [7,7]
+  icon: Factory
   type: Secondary Industry
 Furniture Factory:
   n_cards: 6
   cost: 3
   activation: [8,8]
+  icon: Factory
   type: Secondary Industry
-Moving Company:
-  n_cards: 6
-  cost: 2
-  activation: [9,10]
-  type: Secondary Industry
+# Moving Company:
+#   n_cards: 6
+#   cost: 2
+#   activation: [9,10]
+#   icon: Suitcase
+#   type: Secondary Industry
 Soda Bottling Plant:
   n_cards: 6
   cost: 5
   activation: [11,11]
+  icon: Factory
   type: Secondary Industry
 Fruit and Vegetable Market:
   n_cards: 6
   cost: 2
   activation: [11,12]
+  icon: Fruit
   type: Secondary Industry
 Sushi Bar:
   n_cards: 6
   cost: 2
   activation: [1,1]
+  icon: Cup
   type: Restaurants
 Café:
   n_cards: 6
   cost: 2
   activation: [3,3]
+  icon: Cup
   type: Restaurants
 French Restaurant:
   n_cards: 6
   cost: 3
   activation: [5,5]
+  icon: Cup
   type: Restaurants
 Pizza Joint:
   n_cards: 6
   cost: 1
   activation: [7,7]
+  icon: Cup
   type: Restaurants
 Family Restaurant:
   n_cards: 6
   cost: 3
   activation: [9,10]
+  icon: Cup
   type: Restaurants
 Member's Only Club:
   n_cards: 6
   cost: 4
-  activation: [12,14]
+  activation: [12,12] #[12,14]
+  icon: Cup
   type: Restaurants
 Stadium:
   n_cards: 5
   cost: 6
   activation: [6,6]
+  icon: Major 
   type: Major Establishment
 Publisher:
   n_cards: 5
   cost: 5
   activation: [7,7]
+  icon: Major 
   type: Major Establishment
 Tax Office:
   n_cards: 5
   cost: 4
   activation: [8,9]
+  icon: Major 
   type: Major Establishment
-Business Center:
-  n_cards: 5
-  cost: 8
-  activation: [6,6]
-  type: Major Establishment
+# Business Center:
+#   n_cards: 5
+#   cost: 8
+#   activation: [6,6]
+#   icon: Major 
+#   type: Major Establishment
 Tech Startup:
   n_cards: 5
   cost: 1
   activation: [10,10]
+  icon: Major 
   type: Major Establishment
 City Hall:
   n_cards: 5
   cost: 0
   activation: null
+  icon: Major 
   type: Landmarks
 Harbor:
   n_cards: 5
   cost: 2
   activation: null
+  icon: Major 
   type: Landmarks
 Train Station:
   n_cards: 5
   cost: 4
   activation: null
+  icon: Major 
   type: Landmarks
 Shopping Mall:
   n_cards: 5
   cost: 10
   activation: null
+  icon: Major 
   type: Landmarks
 Amusement Park:
   n_cards: 5
   cost: 16
   activation: null
+  icon: Major 
   type: Landmarks
 Moon Tower:
   n_cards: 5
   cost: 22
   activation: null
+  icon: Major 
   type: Landmarks
 Airport:
   n_cards: 5
   cost: 30
   activation: null
+  icon: Major 
   type: Landmarks
