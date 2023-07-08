@@ -44,13 +44,13 @@ General Store:
   n_cards: 6
   cost: 0
   activation: [2,2]
-  icon: Bread
+  icon: Box
   type: Secondary Industry
 Bakery:
   n_cards: 6
   cost: 1
   activation: [2,3]
-  icon: Bread
+  icon: Box
   type: Secondary Industry
 Demolition Company:
   n_cards: 6
@@ -62,7 +62,7 @@ Flower Shop:
   n_cards: 6
   cost: 1
   activation: [6,6]
-  icon: Bread
+  icon: Box
   type: Secondary Industry
 Cheese Factory:
   n_cards: 6
@@ -160,12 +160,12 @@ Tech Startup:
   activation: [10,10]
   icon: Major 
   type: Major Establishment
-City Hall:
-  n_cards: 5
-  cost: 0
-  activation: null
-  icon: Major 
-  type: Landmarks
+# City Hall: Always present so is commented out
+#   n_cards: 5
+#   cost: 0
+#   activation: null
+#   icon: Major 
+#   type: Landmarks
 Harbor:
   n_cards: 5
   cost: 2

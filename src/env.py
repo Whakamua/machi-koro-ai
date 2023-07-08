@@ -7,17 +7,10 @@ import numpy as np
 
 class PlayerInfo:
     def __init__(self, card_info):
-        # self._icons = {info["icon"]: Tracker() for info in card_info.values()}
-        # self._cards = {card: Card(card, info["cost"], info["activation"], self._icons[info["icon"]], Tracker()) for card, info in card_info.items()}
         self._card_info = card_info
         self._cards = {card: 0 if info["type"] != "Landmarks" else False for card, info in self._card_info.items()}
-        self._cards_per_activation = {i: [] for i in range(1, 13)}
-        for card, info in self._card_info.items():
-            if info["activation"]:
-                for activation in range(info["activation"][0], info["activation"][1]):
-                    self._cards_per_activation[activation].append(card)
         self.coins = 3
-        self._landmarks = 1
+        self._landmarks = 0
         self._tech_startup_investment = 0
 
 
@@ -29,6 +22,15 @@ class PlayerInfo:
         self._add_card("Wheat Field")
         self._add_card("Bakery")
 
+    def invest_in_tech_startup(self):
+        assert self.coins != 0
+        self._tech_startup_investment += 1
+        self.coins -= 1
+    
+    @property
+    def tech_startup_investment(self):
+        return self._tech_startup_investment
+
     @property
     def cards(self):
         return self._cards
@@ -39,17 +41,10 @@ class PlayerInfo:
     @property
     def landmarks(self):
         return self._landmarks
-    
-    def activated_cards(self, diceroll):
-        activated_cards = []
-        for card in self._cards_per_activation[diceroll]:
-            for _ in range(self._cards[card]):
-                activated_cards.append(card)
-        return activated_cards
-    
+
     def buy_card(self, card):
-        assert self._coins >= self._card_info[card]["cost"]
-        self._coins -= self._card_info[card]["cost"]
+        assert self.coins >= self._card_info[card]["cost"]
+        self.coins -= self._card_info[card]["cost"]
         self._add_card(card)
 
     def _add_card(self, card):
@@ -80,12 +75,12 @@ class MarketPlace:
             for card_name in np.unique(init_establisments_for_alley):
                 self._card_to_alley[card_name] = alley_name
 
-        self._marketplace = {"1-6": [deque([]) for _ in range(5)], "7+": [deque([]) for _ in range(5)], "major": [deque([]) for _ in range(2)]}
+        self._state = {"1-6": [deque([]) for _ in range(5)], "7+": [deque([]) for _ in range(5)], "major": [deque([]) for _ in range(2)]}
 
         self.reset()
 
     def _fill_alley(self, alley_name: str):
-        alley = self._marketplace[alley_name]
+        alley = self._state[alley_name]
         while True:
             if len(self._deques[alley_name]) == 0:
                 break
@@ -118,32 +113,40 @@ class MarketPlace:
             name: deque(cards) for name, cards in self._init_establishments.items()
         }
 
-        for alley_name in self._marketplace.keys():
+        for alley_name in self._state.keys():
             self._fill_alley(alley_name)
 
     def get(self, card_name: str):
         alley_name = self._card_to_alley[card_name]
-        for stand in self._marketplace[alley_name]:
+        for stand in self._state[alley_name]:
             if len(stand) != 0 and stand[-1] == card_name:
                 card_name = stand.pop()
                 if len(stand) == 0:
                     self._fill_alley(alley_name)
 
                 return card_name
+        assert False, "Card not in marketplace"
 
     @property
     def obs(self,):
-        return self._marketplace
+        return self._state
 
             
 
-class MachiKoro(gym.Env):
+class MachiKoro:
     def __init__(self, n_players: int):
         self._n_players = n_players
 
         with open('src/card_info.yaml') as f:
             self._card_info = yaml.load(f, Loader=yaml.loader.SafeLoader)
 
+        self._cards_per_activation = {i: [] for i in range(1, 13)}
+        for card, info in self._card_info.items():
+            if info["activation"]:
+                for activation in range(info["activation"][0], info["activation"][1] + 1):
+                    self._cards_per_activation[activation].append(card)
+
+        self._landmark_cards_ascending_in_price = [card for card, info in self._card_info.items() if info["type"] == "Landmarks"]
         self._init_establishments = {
             "1-6": [],
             "7+": [],
@@ -163,11 +166,6 @@ class MachiKoro(gym.Env):
         self.reset()
 
     def reset(self):
-        self._coins = {
-            "1": 42,
-            "5": 24,
-            "10": 12,
-        }
 
         self._marketplace = MarketPlace(self._init_establishments)
 
@@ -176,24 +174,110 @@ class MachiKoro(gym.Env):
         }
 
         self._player_order = [player for player in self._player_info.keys()]
-        random.shuffle(self._player_order)
-        self._current_player = self._player_order[0]
+        # random.shuffle(self._player_order)
+        self._current_player_index = 0
+        self._current_player = self._player_order[self._current_player_index]
 
-    def _dice_roll(self, n_dice: int):
-        diceroll = 0
-        if n_dice == 2:
-            assert "Train Station" in self._player_info[self._current_player]["cards"]
-        for _ in range(n_dice):
-            diceroll += random.randint(1,6)
+        self._stage_order = ["diceroll", "build"]
+        self._stage_index = 0
+        self._stage = self._stage_order[self._stage_index]
+        self._n_stages = len(self._stage_order)
 
-        for player in self._player_info.keys():
-            for card in self._player_info[player].activated_cards(diceroll):
-                self._activate_card(player, card)
+    def _earn_income(self, diceroll):
+        for card_type in ["Restaurants", "Secondary Industry", "Primary Industry", "Major Establishment"]:
+            for player in self._player_info.keys():
+                for card in self._cards_per_activation[diceroll]:
+                    if self._card_info[card]["type"] == card_type:
+                        for _ in range(self._player_info[player].cards[card]):
+                            self._activate_card(player, card)
+
+    def _diceroll(self, action: int):
         
+        if action == "1 dice":
+            n_dice = 1
+        elif action == "2 dice":
+            n_dice = 2
+        else:
+            raise ValueError("choose either 1 or 2 dice")
+        # if n_dice == "3 dice":
+        #     n_dice = 3
 
-    def step(self, action: str):
-        """action: establishment_to_buy"""
-        pass
+        # assert 0 < n_dice <= 2 # to exclude Moon Tower logic
+
+        dicerolls = []
+        if n_dice == 2:
+            assert self._player_info[self._current_player].cards["Train Station"]
+            
+        for _ in range(n_dice):
+            diceroll = random.randint(1,6)
+            dicerolls.append(diceroll)
+        # Not implemented:
+        # if diceroll >= 10:
+            # Harbor logic
+            # ask player to add 2 or not
+
+        # Not implemented
+        # if n_dice == 3:
+        # Moon Tower logic
+            # ask player which dice to remove
+
+        self._earn_income(sum(dicerolls))
+        
+        if self._player_info[self._current_player].cards["Amusement Park"] and n_dice > 1 and dicerolls[0] == dicerolls[1]:
+            # Amusement Park logic
+            return True
+
+        if self._player_info[self._current_player].coins == 0:
+            # City Hall logic
+            self._player_info[self._current_player].coins = 1
+        
+        return False
+    
+    def invest_in_tech_startup(self):
+        assert self._player_info[self._current_player].coins != 0
+        self._player_info[self._current_player].invest_in_tech_startup()
+    
+    def _build(self, action: str):
+        """
+        action: establishment_to_buy
+        returns whether the action resulted in a win or not.
+        """
+        if action == "Build nothing" and self._player_info[self._current_player].cards["Airport"]:
+            self._player_info[self._current_player].coins += 10
+
+        if action != "Build nothing":
+            self._player_info[self._current_player].buy_card(action)
+            if self._card_info[action]["type"] != "Landmarks":
+                self._marketplace.get(action)
+
+    def _advance_stage(self):
+        self._stage_index += 1
+        if self._stage_index > self._n_stages - 1:
+            self._stage_index = 0
+            self._advance_player()
+        self._stage = self._stage_order[self._stage_index]
+
+    def _advance_player(self):
+        self._current_player_index += 1
+        if self._current_player_index > self._n_players - 1:
+            self._current_player_index = 0
+        self._current_player = self._player_order[self._current_player_index]
+
+    def step(self, action: str) -> bool:
+        if self._stage == "build":
+            self._build(action)
+        elif self._stage == "diceroll":
+            roll_again = self._diceroll(action)
+        
+        if self._player_info[self._current_player].landmarks == 6:
+            return True
+        
+        if self._stage == "diceroll" and roll_again:
+            return False
+
+        self._advance_stage()
+
+        return False
 
     def _payment(self, payee, reciever, amount):
         payee_money = self._player_info[payee].coins
@@ -201,79 +285,245 @@ class MachiKoro(gym.Env):
         self._player_info[payee].coins -= amount_paid
         self._player_info[reciever].coins += amount_paid
   
-    def _activate_card(self, player, card, info: str = None):
+    def _activate_card(self, player, card):
         if card == "Wheat Field" or card == "Ranch" or card == "Flower Orchard" or card == "Forest":
             self._player_info[player].coins += 1
 
-        if card == "Mackerel Boat" and self._player_info[player].cards["Harbor"]:
+        elif card == "Mackerel Boat" and self._player_info[player].cards["Harbor"]:
             self._player_info[player].coins += 3
     
-        if card == "Apple Orchard":
+        elif card == "Apple Orchard":
             self._player_info[player].coins += 3
 
-        if card == "Tuna Boat" and self._player_info[player].cards["Harbor"]:
+        elif card == "Tuna Boat" and self._player_info[player].cards["Harbor"]:
             diceroll = random.randint(1,6) + random.randint(1,6)
             self._player_info[player].coins += diceroll
         
-        if card == "General Store" and player == self._current_player and self._player_info[player].landmarks < 3:
-            # less than 2 landmarks but because city hall doesn't count less than 3 is used
-            self._player_info[player].coins += 2
+        elif card == "General Store" and player == self._current_player and self._player_info[player].landmarks <= 1:
+            self._player_info[player].coins += 2 if not self._player_info[player].cards["Shopping Mall"] else 3
         
-        if card == "Bakery" and player == self._current_player:
-            self._player_info[player].coins += 1
+        elif card == "Bakery" and player == self._current_player:
+            self._player_info[player].coins += 1 if not self._player_info[player].cards["Shopping Mall"] else 2
 
-        if card == "Demolition Company" and self._player_info[player].landmarks > 1:
-            # if a landmark can be destroyed, city hall doesn't count so check is for when landmarks ar larger than 1.
-            self._player_info[player].remove_card(info)
-            self._player_info[player].coins += 8
+        elif card == "Demolition Company" and player == self._current_player and self._player_info[player].landmarks >= 1:
+            # Not implemented, promt player which landmark to destroy.
+            destroyed_landmark = None
+            for landmark in self._landmark_cards_ascending_in_price:
+                if self._player_info[player].cards[landmark]:
+                    self._player_info[player].remove_card(landmark)
+                    self._player_info[player].coins += 8
+                    destroyed_landmark = landmark
+                    break
+            assert destroyed_landmark is not None
+
         
-        if card == "Flower Shop" and player == self._current_player:
-            self._player_info[player].coins += self._player_info[player].cards["Flower Orchard"]
+        elif card == "Flower Shop" and player == self._current_player:
+            self._player_info[player].coins += self._player_info[player].cards["Flower Orchard"] if not self._player_info[self._current_player].cards["Shopping Mall"] else self._player_info[player].cards["Flower Orchard"]*2
 
-        if card == "Cheese Factory" and player == self._current_player:
-            self._player_info[player].coins += self._player_info[player].icon_count("Cow") * 3
+        elif card == "Cheese Factory" and player == self._current_player:
+            self._player_info[player].coins += self._player_info[self._current_player].icon_count("Cow") * 3
 
-        if card == "Furniture Factory" and player == self._current_player:
-            self._player_info[player].coins += self._player_info[player].icon_count("Gear") * 3
+        elif card == "Furniture Factory" and player == self._current_player:
+            self._player_info[player].coins += self._player_info[self._current_player].icon_count("Gear") * 3
 
-        if card == "Soda Bottling Plant" and player == self._current_player:
+        # Not implemented
+        # elif card == "Moving Company" and player == self._current_player:
+            # give non major (icon) to another player and get 4 coins from the bank
+
+        elif card == "Soda Bottling Plant" and player == self._current_player:
             for player_info in self._player_info.values():
                 self._player_info[self._current_player].coins += player_info.icon_count("Cup")
         
-        if card == "Fruit and Vegetable Market" and player == self._current_player:
+        elif card == "Fruit and Vegetable Market" and player == self._current_player:
             self._player_info[player].coins += self._player_info[player].icon_count("Grain") * 2
 
-        if card == "Sushi Bar" and player != self._current_player and self._player_info[player].cards["Harbor"]:
-            self._payment(self._current_player, player, 3)
+        elif card == "Sushi Bar" and player != self._current_player and self._player_info[player].cards["Harbor"]:
+            self._payment(self._current_player, player, 3 if not self._player_info[player].cards["Shopping Mall"] else 4)
 
-        if card == "Café" or card == "Pizza Joint" and player != self._current_player:
-            self._payment(self._current_player, player, 1)
+        elif card == "Café" or card == "Pizza Joint" and player != self._current_player:
+            self._payment(self._current_player, player, 1 if not self._player_info[player].cards["Shopping Mall"] else 2)
         
-        if card == "French Restaurant" and player != self._current_player and self._player_info[self._current_player].landmarks > 2:
+        elif card == "French Restaurant" and player != self._current_player and self._player_info[self._current_player].landmarks >= 2:
             # if current player has 2 or more landmarks, transfer 5 coins to the player owning the
-            # french restaurant. City hall doesn't count so check is for when landmarks ar larger than 2.
-            self._payment(self._current_player, player, 5)
+            self._payment(self._current_player, player, 5 if not self._player_info[player].cards["Shopping Mall"] else 6)
 
-        if card == "Family Restaurant" and player != self._current_player:
-            self._payment(self._current_player, player, 2)
+        elif card == "Family Restaurant" and player != self._current_player:
+            self._payment(self._current_player, player, 2 if not self._player_info[player].cards["Shopping Mall"] else 3)
 
-        if card == "Member's Only Club" and player != self._current_player and self._player_info[self._current_player].landmarks > 3:
+        elif card == "Member's Only Club" and player != self._current_player and self._player_info[self._current_player].landmarks >= 3:
             # if current player has 3 or more landmarks, transfer all their coins to the player owning the
-            # member's only club. City hall doesn't count so check is for when landmarks ar larger than 3.
+            # member's only club.
             self._payment(self._current_player, player, self._player_info[self._current_player].coins)
 
-        if card == "Stadium" and player == self._current_player:
+        elif card == "Stadium" and player == self._current_player:
             for player in self._player_info.keys():
                 if player != self._current_player:
                     self._payment(player, self._current_player, 2)
         
-        if card == "Publisher" and player == self._current_player:
+        elif card == "Publisher" and player == self._current_player:
             for player in self._player_info.keys():
                 if player != self._current_player:
-                    coins_to_pay = self._player_info[player].icon_count("Cup") + self._player_info[player].icon_count("Bread")
+                    coins_to_pay = self._player_info[player].icon_count("Cup") + self._player_info[player].icon_count("Box")
                     self._payment(player, self._current_player, coins_to_pay)
 
+        elif card == "Tax Office" and player == self._current_player:
+            for player in self._player_info.keys():
+                if player != self._current_player and self._player_info[player].coins >= 10:
+                    coins_to_pay = int(self._player_info[player].coins / 2)
+                    self._payment(player, self._current_player, coins_to_pay)
 
-if __name__ == "__main__":
-    env = MachiKoro(4)
-    breakpoint()
+        # Not implemented
+        # elif card == "Business Center" and player == self._current_player:
+            # trade non major (icon) card with anothe player
+
+        elif card == "Tech Startup" and player == self._current_player and self._player_info[self._current_player].tech_startup_investment > 0:
+            for player in self._player_info.keys():
+                if player != self._current_player:
+                    self._payment(player, self._current_player, self._player_info[self._current_player].tech_startup_investment)
+
+class GymMachiKoro(gym.Env):
+    def __init__(self, env: MachiKoro):
+        self._env = env
+
+        actions = ["1 dice", "2 dice"]
+        [actions.append(action) for action in self._env._card_info.keys()]
+        actions.append("Build nothing")
+        self._action_idx_to_str = {idx: name for idx, name in enumerate(actions)}
+        self._action_str_to_idx = {name: idx for idx, name in enumerate(actions)}
+
+        self.action_space = gym.spaces.Discrete(len(self._action_idx_to_str))
+
+
+        self._player_to_idx = {player: idx for idx, player in enumerate(self._env._player_order)}
+
+        self._establishments_to_idx = {
+            "1-6": {},
+            "7+": {},
+            "major": {},
+        }
+
+        for card_name, info in self._env._card_info.items():
+            if info["type"] == "Landmarks":
+                continue
+            elif info["type"] == "Major Establishment" and card_name not in self._establishments_to_idx["major"]:
+                self._establishments_to_idx["major"][card_name] = len(self._establishments_to_idx["major"])
+            elif info["activation"][0] <= 6 and card_name not in self._establishments_to_idx["1-6"]:
+                self._establishments_to_idx["1-6"][card_name] = len(self._establishments_to_idx["1-6"])
+            elif card_name not in self._establishments_to_idx["7+"]:
+                self._establishments_to_idx["7+"][card_name] = len(self._establishments_to_idx["7+"])
+
+        obs_space = {}
+        for player in self._env._player_info.keys():
+            for card in self._env._player_info[player].cards.keys():
+                if self._env._card_info[card]["type"] == "Landmarks":
+                    obs_space[f"{player}-{card}"] = gym.spaces.MultiBinary(2)
+                else:
+                    max_cards = self._env._card_info[card]["n_cards"]
+                    obs_space[f"{player}-{card}"] = gym.spaces.MultiBinary(1 + max_cards + (card == "Wheat Field") + (card == "Bakery")) # + 1 so that the 1st entry is reserved for 0 cards
+            obs_space[f"{player}-coins"] = gym.spaces.Box(low=0, high=np.inf)
+        for alley_name, alley in self._env._marketplace._state.items():
+            for i in range(len(alley)):
+                # encoding which card is in the deck
+                obs_space[f"marketplace-{alley_name}-{i}-card"] = gym.spaces.MultiBinary(1 + len(self._establishments_to_idx[alley_name])) # +1 so that the 1st entry is reserved for an empty deque
+
+                # encoding how many cards are in the deck
+                obs_space[f"marketplace-{alley_name}-{i}-amount"] = gym.spaces.MultiBinary(5+1 if alley_name == "major" else 6+1) # major have max 5 cards and others have max 6 cards. +1 is to account for and empty deque
+        obs_space["current_player_index"] = gym.spaces.Discrete(self.n_players)
+        obs_space["current_stage_index"] = gym.spaces.Discrete(self._env._n_stages)
+        self.observation_space = gym.spaces.Dict(obs_space)
+        self._obs = {}
+
+    @property
+    def n_players(self):
+        return self._env._n_players
+    
+    @property
+    def current_player(self):
+        return self._env._current_player
+
+    def diceroll(self, n_dice):
+        return self._env._diceroll(n_dice)
+
+    def _get_info(self):
+        return {"action_mask": self.action_mask}
+
+    def reset(self):
+        self._env.reset()
+        return self.observation(), self._get_info()
+
+    def step(self, action):
+        winner = self._env.step(self._action_idx_to_str[action])
+        obs = self.observation()
+        info = self._get_info()
+        return obs, int(winner), winner, False, info
+    
+    def _diceroll_action_mask(self):
+        action_mask = np.zeros(self.action_space.n)
+        action_mask[self._action_str_to_idx["1 dice"]] = 1
+        if self._env._player_info[self._env._current_player].cards["Train Station"]:
+            action_mask[self._action_str_to_idx["2 dice"]] = 1
+        return action_mask
+        
+
+    def _build_action_mask(self):
+        action_mask = np.zeros(self.action_space.n)
+        cards_in_marketplace = []
+        for alley in self._env._marketplace._state.values():
+            for stand in alley:
+                if len(stand) > 0:
+                    cards_in_marketplace.append(stand[-1])
+        for action in range(self.action_space.n):
+            action_str = self._action_idx_to_str[action]
+            if action_str == "1 dice" or action_str == "2 dice":
+                continue
+            elif action_str == "Build nothing" or self._env._player_info[self._env._current_player].coins >= self._env._card_info[action_str]["cost"] and action_str in cards_in_marketplace:
+                action_mask[action] = 1
+            elif self._env._card_info[action_str]["type"] == "Landmarks" and self._env._player_info[self._env._current_player].coins >= self._env._card_info[action_str]["cost"] and not self._env._player_info[self._env._current_player].cards[action_str]:
+                action_mask[action] = 1
+        return action_mask
+
+    @property
+    def action_mask(self):
+        if self._env._stage == "build":
+            return self._build_action_mask()
+        elif self._env._stage == "diceroll":
+            return self._diceroll_action_mask()
+
+    def sample_action(self):
+        action_mask = self.action_mask()
+        prob_dist = action_mask/sum(action_mask)
+        return np.random.choice(range(self.action_space.n), p=prob_dist)
+
+    def observation(self):
+        for player in self._env._player_info.keys():
+            for card, amount in self._env._player_info[player].cards.items():
+                if self._env._card_info[card]["type"] == "Landmarks":
+                    onehot = np.array([not amount, amount]).astype(int)
+                else:
+                    max_cards = self._env._card_info[card]["n_cards"]
+                    onehot = np.zeros(max_cards + 1 + (card == "Wheat Field") + (card == "Bakery"))
+                    onehot[amount] = 1
+                self._obs[f"{player}-{card}"] = onehot
+            self._obs[f"{player}-coins"] = self._env._player_info[self._env._current_player].coins
+        
+        for alley_name, alley in self._env._marketplace._state.items():
+            for i, stand in enumerate(alley):
+                # encoding which card is in the deck
+                if len(stand) != 0:
+                    card = stand[-1]
+                    onehot = np.zeros(1 + len(self._establishments_to_idx[alley_name])) # +1 so that the 1st entry is reserved for an empty deque
+                    onehot[1 + self._establishments_to_idx[alley_name][card]] = 1 # +1 to account for an empty deck
+                else:
+                    onehot = np.zeros(1 + len(self._establishments_to_idx[alley_name])) # +1 so that the 1st entry is reserved for an empty deque
+                    onehot[0] = 1
+                self._obs[f"marketplace-{alley_name}-{i}-card"] = onehot
+
+                # encoding how many cards are in the deck
+                onehot = np.zeros(5+1 if alley_name == "major" else 6+1) # major have max 5 cards and others have max 6 cards. +1 is to account for and empty deque
+                onehot[len(stand)] = 1
+                self._obs[f"marketplace-{alley_name}-{i}-amount"] = onehot
+        self._obs["current_player_index"] = self._env._current_player_index
+        self._obs["stage_index"] = self._env._stage_index
+        return self._obs
+
+
