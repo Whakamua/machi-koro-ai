@@ -4,6 +4,8 @@ from collections import deque
 import random
 import numpy as np
 import pprint
+from .random_agent import RandomAgent
+import gym
 
 @pytest.fixture
 def env():
@@ -12,6 +14,10 @@ def env():
 @pytest.fixture
 def gymenv(env):
     return GymMachiKoro(env)
+
+@pytest.fixture
+def random_agent(gymenv):
+    return RandomAgent(gymenv.observation_space, gymenv.action_space)
 
 def test_env_init(env):
     for player, info in env._player_info.items():
@@ -35,7 +41,7 @@ def test_city_hall(env):
 
     for player in env._player_info.keys():
         env._current_player = player
-        env.dice_roll(1)
+        env._diceroll("1 dice")
         assert env._player_info[player].coins >= 1
 
 def test_get_one_coin_cards(env):
@@ -542,7 +548,7 @@ def test_shopping_mall_cup_icon(env):
         assert coins - (payment+1) == env._player_info[env._current_player].coins
 
 def test_amusement_park(env):
-    # so that diceroll will be 1, 1, 1, 3
+    # so that diceroll will be [1, 1], [1, 3]
     random.seed(2)
     env._player_info[env._current_player]._add_card("Amusement Park")
     env._player_info[env._current_player]._add_card("Train Station")
@@ -552,7 +558,8 @@ def test_amusement_park(env):
 
 
     coins = env._player_info[env._current_player].coins
-    env.dice_roll(2)
+    env.step("2 dice") # throws [1, 1] so can throw again
+    env.step("2 dice") # throws [1, 3]
 
     # 1 for the bakery and 5 for each flower orchard
     assert coins + 1 + 5 == env._player_info[env._current_player].coins
@@ -560,12 +567,14 @@ def test_amusement_park(env):
 def test_airport(env):
     player = env._current_player
     coins = env._player_info[player].coins
+    env._advance_stage()
     env.step("Build nothing")
     assert coins == env._player_info[player].coins
 
     player = env._current_player
     env._player_info[player]._add_card("Airport")
     coins = env._player_info[player].coins
+    env._advance_stage()
     env.step("Build nothing")
     assert coins + 10 == env._player_info[player].coins
 
@@ -610,6 +619,7 @@ def test_step(env):
 
     for i in range(len(env._player_order)):
         env._marketplace._state["1-6"][0] = deque(["Ranch"])
+        env.step("1 dice")
         env.step("Ranch")
         if i == len(env._player_order) - 1:
             assert env._current_player == env._player_order[0]
@@ -644,57 +654,25 @@ def test_marketplace(env):
         env.reset()
     
 def test_gym_env_obs(gymenv):
-    test_obs = []
     gymenv.reset()
 
-    for player in gymenv._env._player_info.keys():
-        for card, amount in gymenv._env._player_info[player].cards.items():
-            if gymenv._env._card_info[card]["type"] == "Landmarks":
-                onehot = np.array([1, 0])
-            else:
-                max_cards = gymenv._env._card_info[card]["n_cards"]
-                onehot = np.zeros(max_cards + 1 + (card == "Wheat Field") + (card == "Bakery"))
-                if card == "Wheat Field" or card == "Bakery":
-                    onehot[1] = 1
-                else:
-                    onehot[0] = 1
-            test_obs.append(onehot)
+    gymenv._env._advance_stage()
 
-    
-    for i in range(len(gymenv._env._marketplace._state["1-6"])):
-        gymenv._env._marketplace._state["1-6"][i] = deque(["Wheat Field"])
-        onehot=np.zeros(len(gymenv._establishments_to_idx["1-6"]) + 1)
-        onehot[1] = 1
-        test_obs.append(onehot)
-        onehot = np.zeros(7) 
-        onehot[1] = 1
-        test_obs.append(onehot)
-    
-    for i in range(len(gymenv._env._marketplace._state["7+"])):
-        gymenv._env._marketplace._state["7+"][i] = deque(["Mackerel Boat"])
-        onehot=np.zeros(len(gymenv._establishments_to_idx["7+"]) + 1)
-        onehot[1] = 1
-        test_obs.append(onehot)
-        onehot = np.zeros(7)
-        onehot[1] = 1
-        test_obs.append(onehot)
-    
-    for i in range(len(gymenv._env._marketplace._state["major"])):
-        gymenv._env._marketplace._state["major"][i] = deque(["Stadium"])
-        onehot=np.zeros(len(gymenv._establishments_to_idx["major"]) + 1)
-        onehot[1] = 1
-        test_obs.append(onehot)
-        onehot = np.zeros(6)
-        onehot[1] = 1
-        test_obs.append(onehot)
-    
     obs, _, _, _, _ = gymenv.step(gymenv._action_str_to_idx["Build nothing"])
-    assert np.array_equal(np.hstack(test_obs), obs)
+    obs_key_list = list(obs.keys())
 
-def test_winner_random_policy(gymenv):
+    for i, (obs_key, obs_value) in enumerate(gymenv.observation_space.items()):
+        assert obs_key == obs_key_list[i]
+        if isinstance(obs_value, gym.spaces.Box) or isinstance(obs_value, gym.spaces.Discrete):
+            assert isinstance(obs[obs_key_list[i]], int)
+        else:
+            assert obs_value.n == len(obs[obs_key_list[i]])
+            assert sum(obs[obs_key_list[i]]) == 1
+
+def test_winner_random_policy(gymenv, random_agent):
+    obs, _ = gymenv.reset()
     for i in range(1000):
-        gymenv._env.dice_roll(1)
-        action = gymenv.sample_action()
+        action = random_agent.compute_action(obs)
         obs, reward, done, truncated, info = gymenv.step(action)
         if done:
             break

@@ -2,6 +2,7 @@ from env import GymMachiKoro, MachiKoro
 from multielo import MultiElo
 from gym.wrappers.flatten_observation import FlattenObservation
 from random_agent import RandomAgent
+from mcts_agent import MCTSAgent
 
 
 env = MachiKoro(n_players=4)
@@ -13,10 +14,10 @@ player_elo = [1000 for _ in range(env.n_players)]
 wins = [0 for _ in range(env.n_players)]
 
 agents = {
-    "player 0": RandomAgent(env.observation_space, env.action_space),
+    "player 0": MCTSAgent(env.observation_space, env.action_space),
     "player 1": RandomAgent(env.observation_space, env.action_space),
-    "player 2": RandomAgent(env.observation_space, env.action_space),
-    "player 3": RandomAgent(env.observation_space, env.action_space)
+#     "player 2": RandomAgent(env.observation_space, env.action_space),
+#     "player 3": RandomAgent(env.observation_space, env.action_space)
 }
 
 for game in range(10000):
@@ -25,7 +26,7 @@ for game in range(10000):
     count = 0
     while not done:
 
-        action = agents[env.current_player].compute_action(obs, info["action_mask"])
+        action = agents[env.current_player].compute_action(obs, env.get_state())
     
         obs, reward, done, truncated, info = env.step(action)
 

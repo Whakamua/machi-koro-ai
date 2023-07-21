@@ -1,7 +1,5 @@
 import gym
 import numpy as np
-import yaml
-import re
 from torch import nn
 import torch.functional as F
 
@@ -14,7 +12,11 @@ class RandomAgent:
         self.observation_space = observation_space
         self.action_space = action_space
 
-    def compute_action(self, observation, action_mask):
+    def reset(self, env_state = None):
+        return
+
+    def compute_action(self, observation, env_state = None):
+        action_mask = observation["action_mask"]
         prob_dist = action_mask/sum(action_mask)
         return np.random.choice(range(self.action_space.n), p=prob_dist)
 
