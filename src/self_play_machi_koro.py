@@ -16,7 +16,7 @@ import numpy as np
 
 def get_trajectories(env, agents):
     game = 0
-    buffer = Buffer(gamma=1, observation_space=env.observation_space, action_space=env.action_space, capacity=1000)
+    buffer = Buffer(gamma=1, observation_space=env.observation_space, action_space=env.action_space, capacity=10000)
 
     elo = MultiElo()
 
@@ -53,7 +53,7 @@ def get_trajectories(env, agents):
                 player_elo = elo.get_new_ratings(player_elo, result_order=ranking)
                 print(f"game {game} | elo: {player_elo}, wins: {wins}")
                 game += 1
-                # return buffer
+                return buffer
                 # if env.current_player == "player 0":
                 #     return buffer
 
@@ -76,12 +76,14 @@ if __name__ == "__main__":
     env = GymMachiKoro(env)
 
     agents = {
-        # f"player 0": RandomAgent(env.observation_space, env.action_space),
         f"player 0": MCTSAgent(env, num_mcts_sims=100, c_puct=2),
-        f"player 1": RandomAgent(env.observation_space, env.action_space),
+        f"player 1": MCTSAgent(env, num_mcts_sims=100, c_puct=2),
     }
+    assert list(agents.keys()) == env.player_order
+
     buffer = get_trajectories(env, agents)
+    agents["player 0"].train(buffer)
+
     buffer.compute_values()
     obss, actions, rewards, next_obss, dones, player_ids, action_masks, values, probs = buffer.sample(100)
-    # print(buffer._obss[0] == buffer._obss[5])
-    breakpoint()
+    

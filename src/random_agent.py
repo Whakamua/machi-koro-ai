@@ -18,7 +18,7 @@ class RandomAgent:
     def compute_action(self, observation, env_state = None):
         action_mask = observation["action_mask"]
         prob_dist = action_mask/sum(action_mask)
-        return np.random.choice(range(self.action_space.n), p=prob_dist)
+        return np.random.choice(range(self.action_space.n), p=prob_dist), prob_dist
 
 class Policy(nn.Module):
     def __init__(self, n_in, n_out):

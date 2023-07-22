@@ -14,7 +14,7 @@ class Buffer:
     @property
     def isfull(self):
         return self._size == self._capacity
-    
+
     def reset(self):
         self._obss = np.zeros((self._capacity, flatten_space(self._observation_space).shape[0]))
         self._actions = np.zeros((self._capacity, flatten_space(self._action_space).shape[0]))
@@ -24,8 +24,9 @@ class Buffer:
         self._player_ids = np.zeros((self._capacity, 1))
         self._action_masks = np.zeros((self._capacity, flatten_space(self._action_space).shape[0]))
         self._values = np.zeros((self._capacity, 1))
-    
-    def _add_to_idx(self, idx, obs, action, reward, next_obs, done):
+        self._probs = np.zeros((self._capacity, flatten_space(self._action_space).shape[0]))
+
+    def _add_to_idx(self, idx, obs, action, reward, next_obs, done, probs):
         self._obss[idx] = flatten(self._observation_space, obs)
         self._actions[idx] = action
         self._rewards[idx] = reward
@@ -33,10 +34,11 @@ class Buffer:
         self._dones[idx] = done
         self._player_ids[idx] = obs["current_player_index"]
         self._action_masks[idx] = obs["action_mask"]
+        self._probs[idx] = probs
 
-    def add(self, obs, action, reward, next_obs, done):
+    def add(self, obs, action, reward, next_obs, done, probs):
         assert self._size < self._capacity
-        self._add_to_idx(self._size, obs, action, reward, next_obs, done)
+        self._add_to_idx(self._size, obs, action, reward, next_obs, done, probs)
         self._size += 1
         # else:
         #     index = random.randint(0, self._capacity - 1)
@@ -69,8 +71,7 @@ class Buffer:
 
         self._size = len(self._obss)
 
-    def sample(self, batch_size):
-        batch_indices = np.random.randint(low=0, high=self._size, size=batch_size, dtype=int)
+    def _get_batch(self, batch_indices):
         return (
             self._obss[batch_indices],
             self._actions[batch_indices],
@@ -80,4 +81,18 @@ class Buffer:
             self._player_ids[batch_indices],
             self._action_masks[batch_indices],
             self._values[batch_indices],
+            self._probs[batch_indices],
         )
+
+    def sample(self, batch_size):
+        batch_indices = np.random.randint(low=0, high=self._size, size=batch_size, dtype=int)
+        return self._get_batch(batch_indices)
+    
+    def get_random_batches(self, batch_size):
+        assert batch_size <= self._size
+        n_batches = int(self._size / batch_size)
+        indices = np.arange(self._size)
+        np.random.shuffle(indices)
+        batches = np.array_split(indices, n_batches)
+        return [self._get_batch(_indices) for _indices in batches]
+        

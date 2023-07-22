@@ -43,7 +43,7 @@ class PlayerInfo:
     def __init__(self, card_info):
         self._card_info = card_info
         self._cards = {card: 0 if info["type"] != "Landmarks" else False for card, info in self._card_info.items()}
-        self.coins = 3
+        self._coins = 3
         self._landmarks = 0
         self._tech_startup_investment = 0
 
@@ -56,10 +56,14 @@ class PlayerInfo:
         self._add_card("Wheat Field")
         self._add_card("Bakery")
 
+    @property
+    def coins(self):
+        return self._coins
+
     def invest_in_tech_startup(self):
         assert self.coins != 0
         self._tech_startup_investment += 1
-        self.coins -= 1
+        self._coins -= 1
     
     @property
     def tech_startup_investment(self):
@@ -78,7 +82,7 @@ class PlayerInfo:
 
     def buy_card(self, card):
         assert self.coins >= self._card_info[card]["cost"]
-        self.coins -= self._card_info[card]["cost"]
+        self._coins -= self._card_info[card]["cost"]
         self._add_card(card)
 
     def _add_card(self, card):
@@ -270,7 +274,7 @@ class MachiKoro:
 
         if self._player_info[self.current_player].coins == 0:
             # City Hall logic
-            self._player_info[self.current_player].coins = 1
+            self._player_info[self.current_player]._coins = 1
         
         return False
     
@@ -284,7 +288,7 @@ class MachiKoro:
         returns whether the action resulted in a win or not.
         """
         if action == "Build nothing" and self._player_info[self.current_player].cards["Airport"]:
-            self._player_info[self.current_player].coins += 10
+            self._player_info[self.current_player]._coins += 10
 
         if action != "Build nothing":
             self._player_info[self.current_player].buy_card(action)
@@ -327,28 +331,28 @@ class MachiKoro:
     def _payment(self, payee, reciever, amount):
         payee_money = self._player_info[payee].coins
         amount_paid = amount if payee_money - amount >= 0 else payee_money
-        self._player_info[payee].coins -= amount_paid
-        self._player_info[reciever].coins += amount_paid
+        self._player_info[payee]._coins -= amount_paid
+        self._player_info[reciever]._coins += amount_paid
   
     def _activate_card(self, player, card):
         if card == "Wheat Field" or card == "Ranch" or card == "Flower Orchard" or card == "Forest":
-            self._player_info[player].coins += 1
+            self._player_info[player]._coins += 1
 
         elif card == "Mackerel Boat" and self._player_info[player].cards["Harbor"]:
-            self._player_info[player].coins += 3
+            self._player_info[player]._coins += 3
     
         elif card == "Apple Orchard":
-            self._player_info[player].coins += 3
+            self._player_info[player]._coins += 3
 
         elif card == "Tuna Boat" and self._player_info[player].cards["Harbor"]:
             diceroll = random.randint(1,6) + random.randint(1,6)
-            self._player_info[player].coins += diceroll
+            self._player_info[player]._coins += diceroll
         
         elif card == "General Store" and player == self.current_player and self._player_info[player].landmarks <= 1:
-            self._player_info[player].coins += 2 if not self._player_info[player].cards["Shopping Mall"] else 3
+            self._player_info[player]._coins += 2 if not self._player_info[player].cards["Shopping Mall"] else 3
         
         elif card == "Bakery" and player == self.current_player:
-            self._player_info[player].coins += 1 if not self._player_info[player].cards["Shopping Mall"] else 2
+            self._player_info[player]._coins += 1 if not self._player_info[player].cards["Shopping Mall"] else 2
 
         elif card == "Demolition Company" and player == self.current_player and self._player_info[player].landmarks >= 1:
             # Not implemented, promt player which landmark to destroy.
@@ -356,20 +360,20 @@ class MachiKoro:
             for landmark in self._landmark_cards_ascending_in_price:
                 if self._player_info[player].cards[landmark]:
                     self._player_info[player].remove_card(landmark)
-                    self._player_info[player].coins += 8
+                    self._player_info[player]._coins += 8
                     destroyed_landmark = landmark
                     break
             assert destroyed_landmark is not None
 
         
         elif card == "Flower Shop" and player == self.current_player:
-            self._player_info[player].coins += self._player_info[player].cards["Flower Orchard"] if not self._player_info[self.current_player].cards["Shopping Mall"] else self._player_info[player].cards["Flower Orchard"]*2
+            self._player_info[player]._coins += self._player_info[player].cards["Flower Orchard"] if not self._player_info[self.current_player].cards["Shopping Mall"] else self._player_info[player].cards["Flower Orchard"]*2
 
         elif card == "Cheese Factory" and player == self.current_player:
-            self._player_info[player].coins += self._player_info[self.current_player].icon_count("Cow") * 3
+            self._player_info[player]._coins += self._player_info[self.current_player].icon_count("Cow") * 3
 
         elif card == "Furniture Factory" and player == self.current_player:
-            self._player_info[player].coins += self._player_info[self.current_player].icon_count("Gear") * 3
+            self._player_info[player]._coins += self._player_info[self.current_player].icon_count("Gear") * 3
 
         # Not implemented
         # elif card == "Moving Company" and player == self.current_player:
@@ -377,10 +381,10 @@ class MachiKoro:
 
         elif card == "Soda Bottling Plant" and player == self.current_player:
             for player_info in self._player_info.values():
-                self._player_info[self.current_player].coins += player_info.icon_count("Cup")
+                self._player_info[self.current_player]._coins += player_info.icon_count("Cup")
         
         elif card == "Fruit and Vegetable Market" and player == self.current_player:
-            self._player_info[player].coins += self._player_info[player].icon_count("Grain") * 2
+            self._player_info[player]._coins += self._player_info[player].icon_count("Grain") * 2
 
         elif card == "Sushi Bar" and player != self.current_player and self._player_info[player].cards["Harbor"]:
             self._payment(self.current_player, player, 3 if not self._player_info[player].cards["Shopping Mall"] else 4)
@@ -484,6 +488,10 @@ class GymMachiKoro(gym.Env):
         obs_space["action_mask"] = gym.spaces.MultiBinary(self.action_space.n)
         self.observation_space = gym.spaces.Dict(obs_space)
         self._obs = OrderedDict()
+
+    @property
+    def player_info(self):
+        return self._env._player_info
 
     @property
     def n_players(self):

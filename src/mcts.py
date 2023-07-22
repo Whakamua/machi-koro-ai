@@ -59,8 +59,6 @@ class MCTS():
             self.search()
         return self.root.Nsa / self.root.Nsa.sum()
 
-
-
 class Node:
     def __init__(self, parent: Node | None = None, parent_action: int | None = None, env_state: dict | None = None, c_puct: int | None = None):
         self._env_state = env_state
