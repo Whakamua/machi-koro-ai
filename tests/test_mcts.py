@@ -1,5 +1,5 @@
 import pytest
-from .mcts import MCTS, Node
+from mcts import MCTS, Node
 import numpy as np
 import copy
 
@@ -21,14 +21,14 @@ class dummyEnv():
     def current_player(self):
         return self.player_per_step[self.count]
     
-    def reset(self,):
+    def reset(self, state):
         self.count = 0
-        return 0, {}
+        return {"action_mask": np.ones(3)}, {}
     
     def step(self, action):
         self.count+=1
         end_of_episode = self.count == len(self.player_per_step)-1
-        return end_of_episode, end_of_episode, end_of_episode, False, {}
+        return {"action_mask": np.ones(3)}, end_of_episode, end_of_episode, False, {}
 
 @pytest.fixture
 def prior():
@@ -39,7 +39,7 @@ class dummyPvnet():
         self.prior = prior
 
     def predict(self, observation):
-        return self.prior, observation
+        return self.prior, 0
 
 @pytest.fixture
 def pvnet(prior):
@@ -84,8 +84,9 @@ def test_node_backprop(prior, player_per_step):
     assert leaf_node == nodes[-1]
 
 def test_mcts_search(mcts):
+    mcts.reset()
     for i in range(10):
-        mcts.search(mcts.root)
+        mcts.search()
         assert mcts.root.N == i+2
 
     # make sure the leaf node has been found
@@ -99,8 +100,10 @@ def test_mcts_search(mcts):
     assert mcts.root.find_leaf_node().is_terminal
 
 def test_node_puct():
-    node = Node(c_puct=1)
-    node.expand_node(prior=np.array([0.5, 0.5, 0.0]), reward=0, value_estimate=0, env_state=[1,2,3], player=0, is_terminal=False)
+    node_parent = Node(c_puct=1)
+    node_parent.expand_node(prior=np.array([0.5, 0.5, 0.0]), action_mask=np.ones(3), reward=0, value_estimate=0, env_state=[1,2,3], player=0, is_terminal=False)
+    node = Node(parent=node_parent, parent_action=0)
+    node.expand_node(prior=np.array([0.5, 0.5, 0.0]), action_mask=np.ones(3), reward=0, value_estimate=0, env_state=[1,2,3], player=0, is_terminal=False)
 
     node._Qsa_accumulated = np.array([8, 16, 32])
     node._Nsa = np.array([4, 4, 0])

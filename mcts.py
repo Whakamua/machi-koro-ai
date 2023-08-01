@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import warnings
+import copy
 
 
 class MCTS():
@@ -22,6 +23,9 @@ class MCTS():
     @property
     def root(self):
         return self._root
+    
+    def update_pvnet(self, pvnet):
+        self.pvnet = copy.deepcopy(pvnet)
 
     def reset(self, env_state: dict | None = None):
         del self._root
@@ -33,7 +37,7 @@ class MCTS():
         prior, value_estimate = self.pvnet.predict(observation)
         node = root_node.find_leaf_node()
         assert node == root_node
-        root_node.expand_node(prior=prior, value_estimate=value_estimate, env_state=self.env.get_state(), player=self.env.current_player, reward=0)
+        root_node.expand_node(prior=prior, action_mask=observation["action_mask"], value_estimate=value_estimate, env_state=self.env.get_state(), player=self.env.current_player, reward=0)
         self.set_root(root_node)
 
     def set_root(self, root: Node):
@@ -44,9 +48,10 @@ class MCTS():
         if not leaf_node.is_terminal:
             self.env.set_state(leaf_node.parent.env_state)
             observation, reward, done, _, info = self.env.step(leaf_node.parent_action)
+            
             prior, value_estimate = self.pvnet.predict(observation)
 
-            leaf_node.expand_node(prior=prior, reward=reward, value_estimate=value_estimate, env_state=self.env.get_state(), player=self.env.current_player, is_terminal=done)
+            leaf_node.expand_node(prior=prior, action_mask=observation["action_mask"], reward=reward, value_estimate=value_estimate, env_state=self.env.get_state(), player=self.env.current_player, is_terminal=done)
 
         if leaf_node.is_terminal:
             assert leaf_node.player == leaf_node.parent.player
@@ -132,8 +137,13 @@ class Node:
     def is_terminal(self):
         return self._is_terminal
 
-    def expand_node(self, prior, reward, value_estimate, env_state, player, is_terminal: bool = False):
+    def expand_node(self, prior, action_mask, reward, value_estimate, env_state, player, is_terminal: bool = False):
         self._env_state = env_state
+        if self.parent is None:
+            epsilon = 0.25
+            noise = np.random.default_rng().dirichlet((tuple(np.ones(len(prior))*0.3)),1)[0]
+            prior = (1-epsilon)*prior + epsilon*noise
+
         self._Psa = prior
         self._reward = reward
         self._Qsa_accumulated = np.zeros_like(prior)
@@ -144,6 +154,11 @@ class Node:
         self._children = {i: Node(self, i) for i in range(len(prior))}
         self._accumulated_value = value_estimate
         self._player = player
+        self._action_mask = action_mask.astype(bool)
+
+    @property
+    def action_mask(self):
+        return self._action_mask.astype(int)
 
     @property
     def value_estimate(self):
@@ -159,7 +174,10 @@ class Node:
 
     @property
     def PUCTsa(self):
-        return self.Qsa + self.c_puct * self.Psa * (self.N/ (1+self.Nsa))**0.5
+        PUCTsa = self.Qsa + self.c_puct * self.Psa * (self.N/ (1+self.Nsa))**0.5
+        PUCTsa[~self._action_mask] = -np.inf
+        
+        return PUCTsa
 
     @property
     def best_action(self):

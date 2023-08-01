@@ -175,7 +175,7 @@ class MachiKoro:
     def __init__(self, n_players: int):
         self._n_players = n_players
 
-        with open('src/card_info.yaml') as f:
+        with open('card_info.yaml') as f:
             self._card_info = yaml.load(f, Loader=yaml.loader.SafeLoader)
 
         self._cards_per_activation = {i: [] for i in range(1, 13)}
@@ -205,7 +205,6 @@ class MachiKoro:
         self._n_stages = len(self._stage_order)
         self._player_order = [f"player {i}" for i in range(self._n_players)]
 
-
         self.reset()
 
     def reset(self):
@@ -224,9 +223,25 @@ class MachiKoro:
     def current_player(self):
         return self._player_order[self._current_player_index]
     
+    @current_player.setter
+    def current_player(self, val):
+        self._current_player_index = self._player_order.index(val)
+    
     @property
     def current_stage(self):
         return self._stage_order[self._current_stage_index]
+    
+    @property
+    def player_info(self):
+        return self._player_info
+
+    @property
+    def n_players(self):
+        return self._n_players
+
+    @property
+    def player_order(self):
+        return self._player_order
 
     def _earn_income(self, diceroll):
         for card_type in ["Restaurants", "Secondary Industry", "Primary Industry", "Major Establishment"]:
@@ -435,7 +450,7 @@ class GymMachiKoro(gym.Env):
         self._env = env
 
         actions = ["1 dice", "2 dice"]
-        [actions.append(action) for action in self._env._card_info.keys()]
+        [actions.append(action) for action in self.card_info.keys()]
         actions.append("Build nothing")
         self._action_idx_to_str = {idx: name for idx, name in enumerate(actions)}
         self._action_str_to_idx = {name: idx for idx, name in enumerate(actions)}
@@ -450,7 +465,7 @@ class GymMachiKoro(gym.Env):
             "major": {},
         }
 
-        for card_name, info in self._env._card_info.items():
+        for card_name, info in self.card_info.items():
             if info["type"] == "Landmarks":
                 continue
             elif info["type"] == "Major Establishment" and card_name not in self._establishments_to_idx["major"]:
@@ -463,11 +478,11 @@ class GymMachiKoro(gym.Env):
         obs_space = OrderedDict()
 
         def add_player_obs_spaces(player):
-            for card in self._env._card_info.keys():
-                if self._env._card_info[card]["type"] == "Landmarks":
+            for card in self.card_info.keys():
+                if self.card_info[card]["type"] == "Landmarks":
                     obs_space[f"{player}-{card}"] = gym.spaces.MultiBinary(2)
                 else:
-                    max_cards = self._env._card_info[card]["n_cards"]
+                    max_cards = self.card_info[card]["n_cards"]
                     obs_space[f"{player}-{card}"] = gym.spaces.MultiBinary(1 + max_cards + (card == "Wheat Field") + (card == "Bakery")) # + 1 so that the 1st entry is reserved for 0 cards
             obs_space[f"{player}-coins"] = gym.spaces.Box(low=0, high=np.inf)
         
@@ -490,20 +505,28 @@ class GymMachiKoro(gym.Env):
         self._obs = OrderedDict()
 
     @property
+    def card_info(self):
+        return self._env._card_info
+
+    @property
     def player_info(self):
-        return self._env._player_info
+        return self._env.player_info
 
     @property
     def n_players(self):
-        return self._env._n_players
+        return self._env.n_players
 
     @property
     def player_order(self):
-        return self._env._player_order
+        return self._env.player_order
     
     @property
     def current_player(self):
         return self._env.current_player
+    
+    @current_player.setter
+    def current_player(self, val):
+        self._env.current_player = val
 
     @property
     def current_player_index(self):
@@ -562,7 +585,7 @@ class GymMachiKoro(gym.Env):
         if self._env._player_info[self.current_player].cards["Train Station"]:
             action_mask[self._action_str_to_idx["2 dice"]] = 1
         return action_mask
-        
+
 
     def _build_action_mask(self):
         action_mask = np.zeros(self.action_space.n)
@@ -575,9 +598,9 @@ class GymMachiKoro(gym.Env):
             action_str = self._action_idx_to_str[action]
             if action_str == "1 dice" or action_str == "2 dice":
                 continue
-            elif action_str == "Build nothing" or self._env._player_info[self.current_player].coins >= self._env._card_info[action_str]["cost"] and action_str in cards_in_marketplace:
+            elif action_str == "Build nothing" or self._env._player_info[self.current_player].coins >= self.card_info[action_str]["cost"] and action_str in cards_in_marketplace:
                 action_mask[action] = 1
-            elif self._env._card_info[action_str]["type"] == "Landmarks" and self._env._player_info[self.current_player].coins >= self._env._card_info[action_str]["cost"] and not self._env._player_info[self.current_player].cards[action_str]:
+            elif self.card_info[action_str]["type"] == "Landmarks" and self._env._player_info[self.current_player].coins >= self.card_info[action_str]["cost"] and not self._env._player_info[self.current_player].cards[action_str]:
                 action_mask[action] = 1
         return action_mask
 
@@ -588,17 +611,17 @@ class GymMachiKoro(gym.Env):
         elif self._env.current_stage == "diceroll":
             return self._diceroll_action_mask()
 
-    def sample_action(self):
-        action_mask = self.action_mask()
-        prob_dist = action_mask/sum(action_mask)
-        return np.random.choice(range(self.action_space.n), p=prob_dist)
+    # def sample_action(self):
+    #     action_mask = self.action_mask()
+    #     prob_dist = action_mask/sum(action_mask)
+    #     return np.random.choice(range(self.action_space.n), p=prob_dist)
     
     def _add_player_obs(self, player, player_obs_name):
         for card, amount in self._env._player_info[player].cards.items():
-            if self._env._card_info[card]["type"] == "Landmarks":
+            if self.card_info[card]["type"] == "Landmarks":
                 onehot = np.array([not amount, amount]).astype(int)
             else:
-                max_cards = self._env._card_info[card]["n_cards"]
+                max_cards = self.card_info[card]["n_cards"]
                 onehot = np.zeros(max_cards + 1 + (card == "Wheat Field") + (card == "Bakery"))
                 onehot[amount] = 1
             self._obs[f"{player_obs_name}-{card}"] = onehot
@@ -637,6 +660,25 @@ class GymMachiKoro(gym.Env):
         self._obs["current_stage_index"] = self._env._current_stage_index
         self._obs["action_mask"] = self.action_mask
         return copy.deepcopy(self._obs)
+    
+    def flattened_obs(self,):
+        return gym.spaces.flatten(self.observation_space, self.observation())
+    
+    def _player_info_from_obs(self, player, player_obs_name):
+            info = PlayerInfo(self.card_info)
+            
+            for card, amount in self._env._player_info[player].cards.items():
+                if self.card_info[card]["type"] == "Landmarks":
+                    onehot = np.array([not amount, amount]).astype(int)
+                else:
+                    max_cards = self.card_info[card]["n_cards"]
+                    onehot = np.zeros(max_cards + 1 + (card == "Wheat Field") + (card == "Bakery"))
+                    onehot[amount] = 1
+                self._obs[f"{player_obs_name}-{card}"] = onehot
+            self._obs[f"{player_obs_name}-coins"] = self._env._player_info[self.current_player].coins
+
+    def set_state_from_obs(self, obs: dict):
+        breakpoint()
     
     def getObservation(self, state):
         self.set_state(state)

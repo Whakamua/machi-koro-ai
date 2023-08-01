@@ -1,6 +1,6 @@
 import pytest
-from .mcts_agent import MCTSAgent
-from .env import MachiKoro, GymMachiKoro
+from mcts_agent import MCTSAgent
+from env import MachiKoro, GymMachiKoro
 import numpy as np
 
 class dummyPvnet():
