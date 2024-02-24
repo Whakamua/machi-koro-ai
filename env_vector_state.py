@@ -200,79 +200,79 @@ class MachiKoro:
             "major": [],
         }
 
-        # # construct state
+        # construct state
 
-        # state = []
-        # self._state_indices = {}
-        # self._state_indices["player_info"] = {}
+        state = []
+        self._state_indices = {}
+        self._state_indices["player_info"] = {}
 
-        # for player in range(n_players):
-        #     self._state_indices["player_info"][player] = {}
+        for player in range(n_players):
+            self._state_indices["player_info"][player] = {}
 
-        #     # cards in city
-        #     self._state_indices["player_info"][player]["cards"] = {}
-        #     for card in self._card_info.keys():
-        #         self._state_indices["player_info"][player]["cards"][card] = len(state)
-        #         state.append(0)
+            # cards in city
+            self._state_indices["player_info"][player]["cards"] = {}
+            for card in self._card_info.keys():
+                self._state_indices["player_info"][player]["cards"][card] = len(state)
+                state.append(0)
 
-        #     # coins
-        #     self._state_indices["player_info"][player]["coins"] = len(state)
-        #     state.append(3)
+            # coins
+            self._state_indices["player_info"][player]["coins"] = len(state)
+            state.append(3)
             
-        #     # tech startup investment
-        #     self._state_indices["player_info"][player]["tech_startup_investment"] = len(state)
-        #     state.append(0)
+            # tech startup investment
+            self._state_indices["player_info"][player]["tech_startup_investment"] = len(state)
+            state.append(0)
 
         
-        # # deques
-        # self._card_name_to_num = {name: i for i, (name, info) in enumerate(list(self._card_info.items())) if info["type"] != "Landmarks"}
-        # self._card_num_to_name = {i: name for name, i in self._card_name_to_num.items()}
+        # deques
+        self._card_name_to_num = {name: i for i, (name, info) in enumerate(list(self._card_info.items())) if info["type"] != "Landmarks"}
+        self._card_num_to_name = {i: name for name, i in self._card_name_to_num.items()}
 
-        # self._1_6_deque = []
-        # self._7_plus_deque = []
-        # self._major_deque = []
+        self._1_6_deque = []
+        self._7_plus_deque = []
+        self._major_deque = []
 
-        # for card_name, card_info in self._card_info.items():
-        #     if info["type"] == "Landmarks":
-        #         continue
-        #     elif info["type"] == "Major Establishment":
-        #         self._major_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
-        #     elif info["activation"][0] <= 6:
-        #         self._1_6_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
-        #     else:
-        #         self._7_plus_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
-        #     breakpoint()
-        # breakpoint()
-        # random.shuffle(self._1_6_deque)
-        # random.shuffle(self._7_plus_deque)
-        # random.shuffle(self._major_deque)
+        for card_name, card_info in self._card_info.items():
+            if info["type"] == "Landmarks":
+                continue
+            elif info["type"] == "Major Establishment":
+                self._major_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
+            elif info["activation"][0] <= 6:
+                self._1_6_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
+            else:
+                self._7_plus_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
+            breakpoint()
+        breakpoint()
+        random.shuffle(self._1_6_deque)
+        random.shuffle(self._7_plus_deque)
+        random.shuffle(self._major_deque)
 
-        # self._state_indices["deques"] = {}
-        # self._state_indices["deques"]["1-6"] = {}
+        self._state_indices["deques"] = {}
+        self._state_indices["deques"]["1-6"] = {}
 
-        # self._state_indices["deques"]["1-6"]["cards"] = range(len(state), len(state)+len(self._1_6_deque))
-        # state.extend(self._1_6_deque)
-        # self._state_indices["deques"]["1-6"]["top_card"] = len(state)
-        # state.append(len(state))
+        self._state_indices["deques"]["1-6"]["cards"] = range(len(state), len(state)+len(self._1_6_deque))
+        state.extend(self._1_6_deque)
+        self._state_indices["deques"]["1-6"]["top_card"] = len(state)
+        state.append(len(state))
 
-        # self._state_indices["deques"]["7_plus"] = {}
-        # self._state_indices["deques"]["7_plus"]["cards"] = range(len(state), len(state)+len(self._7_plus_deque))
-        # state.extend(self._7_plus_deque)
-        # self._state_indices["deques"]["7_plus"]["top_card"] = len(state)
-        # state.append(len(state))
+        self._state_indices["deques"]["7_plus"] = {}
+        self._state_indices["deques"]["7_plus"]["cards"] = range(len(state), len(state)+len(self._7_plus_deque))
+        state.extend(self._7_plus_deque)
+        self._state_indices["deques"]["7_plus"]["top_card"] = len(state)
+        state.append(len(state))
 
-        # self._state_indices["deques"]["major"] = {}
-        # self._state_indices["deques"]["major"]["cards"] = range(len(state), len(state)+len(self._major_deque))
-        # state.extend(self._major_deque)
-        # self._state_indices["deques"]["major"]["top_card"] = len(state)
-        # state.append(len(state))
+        self._state_indices["deques"]["major"] = {}
+        self._state_indices["deques"]["major"]["cards"] = range(len(state), len(state)+len(self._major_deque))
+        state.extend(self._major_deque)
+        self._state_indices["deques"]["major"]["top_card"] = len(state)
+        state.append(len(state))
         
-        # breakpoint()
-        # self._state_indices["marketplace"] = {}
-        # self._state_indices["marketplace"]["1-6"] = {}
-        # self._state_indices["marketplace"]["7+"] = {}
-        # self._state_indices["marketplace"]["major"] = {}
-        # self._state_indices["marketplace"]["landmarks"] = {}
+        breakpoint()
+        self._state_indices["marketplace"] = {}
+        self._state_indices["marketplace"]["1-6"] = {}
+        self._state_indices["marketplace"]["7+"] = {}
+        self._state_indices["marketplace"]["major"] = {}
+        self._state_indices["marketplace"]["landmarks"] = {}
 
         for card_name, info in self._card_info.items():
             if info["type"] == "Landmarks":

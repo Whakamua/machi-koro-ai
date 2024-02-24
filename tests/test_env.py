@@ -6,6 +6,7 @@ import numpy as np
 import pprint
 from random_agent import RandomAgent
 import gym
+import copy
 
 @pytest.fixture
 def env():
@@ -27,6 +28,19 @@ def get_not_current_player(player_order, current_player):
         if current_player != player:
             return player
 
+def test_n_landmarks(env):
+    for player, info in env._player_info.items():
+        n_landmarks = 0
+        assert info.n_landmarks == n_landmarks
+        for landmark in info._landmarks:
+            info._add_card(landmark)
+            n_landmarks += 1
+            try:
+                assert info.n_landmarks == n_landmarks
+            except:
+                breakpoint()
+            
+
 def test_env_init(env):
     for player, info in env._player_info.items():
         assert info.cards == {
@@ -41,7 +55,7 @@ def test_env_init(env):
             'Amusement Park': False, 'Moon Tower': False, 'Airport': False
         }
         assert info.coins == 3
-        assert info.landmarks == 0
+        assert info.n_landmarks == 0
     
 def test_city_hall(env):
     for player_info in env._player_info.values():
@@ -687,6 +701,38 @@ def test_winner_random_policy(gymenv, random_agent):
             break
     assert done
 
-# def test_set_state_from_obs(gymenv):
-#     obs = gymenv.flattened_obs()
-#     gymenv.set_state_from_obs(obs)
+from unittest.mock import MagicMock
+
+def test_roll_dice_always_returns_6(gymenv):
+    random.randint = MagicMock(return_value=2)
+    # makes sure that player 0 gets 1 coin in the first turn
+
+    init_state = gymenv.get_state()
+    init_state_deepcopy = copy.deepcopy(init_state)
+    assert init_state.player_info["player 0"].coins == 3
+
+    obsa, reward, done, _, info = gymenv.step(0)
+    obsa_deepcopy = copy.deepcopy(obsa)
+    state_tp1a = info["state"]
+    assert init_state.player_info["player 0"].coins == 3
+    assert state_tp1a.player_info["player 0"].coins == 4
+
+    assert init_state != state_tp1a
+    assert init_state != gymenv.get_state()
+    assert info["state"] == gymenv.get_state()
+    assert init_state == init_state_deepcopy
+
+    gymenv.set_state(init_state)
+    assert init_state.player_info["player 0"].coins == 3
+
+    obsb, reward, done, _, info = gymenv.step(0)
+    obsb_deepcopy = copy.deepcopy(obsb)
+    state_tp1b = info["state"]
+    assert init_state.player_info["player 0"].coins == 3
+    assert state_tp1b.player_info["player 0"].coins == 4
+
+    assert state_tp1a == state_tp1b
+
+    for key in obsa_deepcopy.keys():
+        assert np.array_equal(obsa_deepcopy[key], obsb_deepcopy[key])
+    

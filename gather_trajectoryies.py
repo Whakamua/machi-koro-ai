@@ -71,12 +71,12 @@ def get_trajectories(env, agents):
 
 # game 9999 | elo: [1035.11131277  995.44385084  985.17885556  984.26598084], wins: [2607, 2594, 2433, 2366]
 # print("player 0")
-# buffers["player 0"].post_process()
+# buffers["player 0"].compute_values()
 # [print(value, reward, done) for value, reward, done in zip(buffers["player 0"]._values, buffers["player 0"]._rewards, buffers["player 0"]._dones)]
 # # print(buffers["player 0"]._rewards)
 
 # print("player 1")
-# buffers["player 1"].post_process()
+# buffers["player 1"].compute_values()
 # [print(value, reward, done) for value, reward, done in zip(buffers["player 1"]._values, buffers["player 1"]._rewards, buffers["player 1"]._dones)]
 # print(buffer._obss[0] == buffer._obss[5])
 if __name__ == "__main__":
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     }
     agents["player 0"].update_pvnet("src/checkpoints/9.pt")
     buffer = get_trajectories(env, agents)
-    buffer.post_process()
+    buffer.compute_values()
     obss, actions, rewards, next_obss, dones, player_ids, action_masks, values, probs = buffer.sample(100)
     # print(buffer._obss[0] == buffer._obss[5])
     breakpoint()

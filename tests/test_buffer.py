@@ -3,6 +3,7 @@ from buffer import Buffer, BigBuffer
 from gym.spaces import flatten, flatten_space, Discrete, MultiBinary, Dict
 from collections import OrderedDict
 import numpy as np
+import copy
 
 @pytest.fixture
 def observation_space():
@@ -20,11 +21,36 @@ def action_space():
 @pytest.fixture
 def buffer(observation_space, action_space):
     return Buffer(
-        gamma=1,
         observation_space=observation_space,
         action_space=action_space,
         capacity=10
     )
+
+def test_exclude_terminal_states(buffer, observation_space, action_space):
+    init_dones = np.array([0,0,1,0,0,1,0,1]).astype(bool)
+    for done in init_dones:
+        buffer.add(
+            obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            action = action_space.sample(),
+            reward = 0,
+            next_obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            done = done,
+            probs = np.ones(action_space.n)/action_space.n,
+            )
+    obss,_,_,_,_,_,_,_,_ = buffer.sample(batch_size=len(init_dones))
+    assert len(obss) == len(init_dones)
+
+    batches = buffer.get_random_batches(batch_size=len(init_dones)/2)
+    assert len(batches) == 2
+    assert len(batches[0][0]) == len(init_dones)/2
+    assert len(batches[1][0]) == len(init_dones)/2
+
+    obss,_,_,_,_,_,_,_,_  = buffer.sample(batch_size=sum(init_dones == 0), exclude_terminal_states=True)
+    assert len(obss) == sum(init_dones == 0)
+
+    batches = buffer.get_random_batches(batch_size=np.ceil(sum(init_dones == 0)/2), exclude_terminal_states=True)
+    assert len(batches) == 2
+    assert len(batches[0][0]) + len(batches[1][0]) == sum(init_dones == 0)
 
 def test_buffer(buffer, observation_space, action_space):
     count = 0
@@ -56,7 +82,7 @@ def test_buffer(buffer, observation_space, action_space):
             )
         count+=1
         
-    buffer.post_process()
+    buffer.compute_values()
     buffer.sample(batch_size=5)
     assert np.array_equal(buffer.values, np.array([[1.], [1.], [1.], [1.], [0.], [-1.], [-1.], [-1.], [-1.], [0.]]))
     assert np.array_equal(buffer.rewards, np.array([[0.], [0.], [0.], [0.], [1.], [0.], [0.], [0.], [0.], [1.]]))
@@ -80,4 +106,41 @@ def test_buffer(buffer, observation_space, action_space):
 
     assert np.array_equal(obss[:,0], np.arange(5))
 
-    
+
+def test_combine_buffer(buffer, action_space):
+
+    for i in range(10):
+        buffer.add(
+            obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            action = action_space.sample(),
+            reward = int((i-1) % 3 == 0),
+            next_obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            done = (i-1) % 3 == 0,
+            probs = np.ones(action_space.n)/action_space.n,
+        )
+    buffer2 = copy.deepcopy(buffer)
+    bigbuffer = buffer.get_big_buffer()
+    bigbuffer.combine_buffers([buffer, buffer2])
+    bigbuffer.compute_values()
+    assert np.array_equal(bigbuffer.values, np.array([
+        [1],
+        [0],
+        [1],
+        [1],
+        [0],
+        [1],
+        [1],
+        [0],
+        [0],
+        [0],
+        [1],
+        [0],
+        [1],
+        [1],
+        [0],
+        [1],
+        [1],
+        [0],
+        [0],
+        [0]
+    ]))

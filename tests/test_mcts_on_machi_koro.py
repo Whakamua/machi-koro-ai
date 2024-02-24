@@ -24,8 +24,9 @@ def mctsagent(env, pvnet):
     mctsagent.mcts.pvnet = pvnet
     return mctsagent
 
-def test_mcts_finds_optimal_actions_with_random_policy_net(env, mctsagent):
-    state = env.get_state()
+def test_mcts_find_optimal_actions_with_random_policy_net(env, mctsagent):
+    obs, info = env.reset()
+    state = info["state"]
     for card, info in env._env._card_info.items():
         if card == "Harbor":
             continue
@@ -35,15 +36,15 @@ def test_mcts_finds_optimal_actions_with_random_policy_net(env, mctsagent):
     
     state.player_info["player 0"]._coins = env._env._card_info["Harbor"]["cost"]
     env.set_state(state)
-    mctsagent.reset(env.get_state())
+    mctsagent.reset(state)
 
-    action = mctsagent.compute_action(env.observation(), env.get_state())
+    action, probs = mctsagent.compute_action(env.observation(), state)
     assert action == env._action_str_to_idx["1 dice"]
 
     observation, reward, done, _, info = env.step(action)
-    mctsagent.reset(env.get_state())
+    mctsagent.reset(info["state"])
     mctsagent.mcts.num_mcts_sims = 100
-    action = mctsagent.compute_action(env.observation(), env.get_state())
+    action, probs = mctsagent.compute_action(env.observation(), info["state"])
     assert action == env._action_str_to_idx["Harbor"]
     observation, reward, done, _, info = env.step(action)
     assert done
