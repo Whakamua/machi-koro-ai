@@ -45,6 +45,9 @@ class State():
 
         return equal
 
+    
+
+
 class PlayerInfo:
     def __init__(self, card_info):
         self._card_info = card_info
@@ -62,6 +65,17 @@ class PlayerInfo:
 
         self._add_card("Wheat Field")
         self._add_card("Bakery")
+
+        self._state_indices = {
+            name: i for i, name in enumerate(
+                list(self._cards.keys())
+                + ["coins"]
+                + ["tech_startup_investment"]
+            )
+        }
+        self._state = np.zeros(
+            len(self._state_indices)
+        ).tolist()
 
     @property
     def coins(self):
@@ -112,8 +126,24 @@ class PlayerInfo:
             self._cards[card] -= 1
             self._icon_count[self._card_info[card]["icon"]] -= 1
 
+    def as_list(self):
+        for card in self._cards.keys():
+            self._state[self._state_indices[card]] = self._cards[card]
+            
+        self._state[self._state_indices["coins"]] = self._coins
+        self._state[self._state_indices["tech_startup_investment"]] = self._tech_startup_investment
+        return self._state
+    
+    def from_list(self, _list):
+        for card in self._cards.keys():
+            self._cards[card] = _list[self._state_indices[card]]
+        self._coins = _list[self._state_indices["coins"]]
+        self._tech_startup_investment = _list[self._state_indices["tech_startup_investment"]]
+
+
 class MarketPlace:
-    def __init__(self, init_establishments: list[str]):
+    def __init__(self, init_establishments: list[str], card_info):
+        self._card_info = card_info
         self._init_establishments = copy.deepcopy(init_establishments)
         
         self._card_to_alley = {}
@@ -121,29 +151,75 @@ class MarketPlace:
             for card_name in np.unique(init_establisments_for_alley):
                 self._card_to_alley[card_name] = alley_name
 
-        self._state = {"1-6": [deque([]) for _ in range(5)], "7+": [deque([]) for _ in range(5)], "major": [deque([]) for _ in range(2)]}
+        [random.shuffle(cards) for cards in self._init_establishments.values()]
+        self._deques = {
+            name: copy.deepcopy(cards) for name, cards in self._init_establishments.items()
+        }
 
-        self.reset()
+        self._alleys = {"1-6": [deque([]) for _ in range(5)], "7+": [deque([]) for _ in range(5)], "major": [deque([]) for _ in range(2)]}
+
+        self._card_name_to_num = {name: i for i, (name, info) in enumerate(list(self._card_info.items()))}
+        self._card_num_to_name = {i: name for name, i in self._card_name_to_num.items()}
+
+        self._state_indices = {}
+        self._state_indices["deques"] = {}
+        self._deque_max_lengths = {}
+        state_len = 0
+
+        self._state_indices["deques"]["1-6"] = list(range(state_len, state_len+len(self._deques["1-6"])))
+        state_len += len(self._deques["1-6"])
+        # self._deque_max_lengths["1-6"] = len(self._deques["1-6"])
+
+        self._state_indices["deques"]["7+"] = list(range(state_len, state_len+len(self._deques["7+"])))
+        state_len += len(self._deques["7+"])
+        # self._deque_max_lengths["7+"] = len(self._deques["7+"])
+
+        self._state_indices["deques"]["major"] = list(range(state_len, state_len+len(self._deques["major"])))
+        state_len += len(self._deques["major"])
+        # self._deque_max_lengths["major"] = len(self._deques["major"])
+
+
+        self._state_indices["marketplace"] = {}
+        self._state_indices["marketplace"]["1-6"] = {}
+        for pos in range(5):
+            self._state_indices["marketplace"]["1-6"][f"pos_{pos}"] = {"card": state_len, "count": state_len+1}
+            state_len += 2
+
+        self._state_indices["marketplace"]["7+"] = {}
+        for pos in range(5):
+            self._state_indices["marketplace"]["7+"][f"pos_{pos}"] = {"card": state_len, "count": state_len+1}
+            state_len += 2
+
+        self._state_indices["marketplace"]["major"] = {}
+        for pos in range(2):
+            self._state_indices["marketplace"]["major"][f"pos_{pos}"] = {"card": state_len, "count": state_len+1}
+            state_len += 2
+
+
+        self._state = np.zeros(state_len).tolist()
+
+        for alley_name in self._alleys.keys():
+            self._fill_alley(alley_name)
 
     def _fill_alley(self, alley_name: str):
-        alley = self._state[alley_name]
+        alley = self._alleys[alley_name]
         while True:
             if len(self._deques[alley_name]) == 0:
                 break
-
-            card_name = self._deques[alley_name].pop(random.randint(0, len(self._deques[alley_name]) - 1))
+            # assert False, "only take card when it can be put in an alley. Currently the card is thrown if there is not spot"
+            card_name = self._deques[alley_name][-1]
 
             for stand in alley:
                 if len(stand) == 0:
                     card_in_other_stand = False
-                    for _stand in alley:
-                        if len(_stand) != 0 and card_name == _stand[-1]:
+                    for other_stand in alley:
+                        if len(other_stand) != 0 and card_name == other_stand[-1]:
                             card_in_other_stand = True
                     if not card_in_other_stand:
-                        stand.append(card_name)
+                        stand.append(self._deques[alley_name].pop(-1))
                         break
-                elif len(stand) < 5 and stand[-1] == card_name:
-                    stand.append(card_name)
+                elif stand[-1] == card_name:
+                    stand.append(self._deques[alley_name].pop(-1))
                     break
 
             empty_stands = False
@@ -153,18 +229,9 @@ class MarketPlace:
             if not empty_stands or len(self._deques[alley_name]) == 0:
                 break
 
-    def reset(self,):
-        [random.shuffle(cards) for cards in self._init_establishments.values()]
-        self._deques = {
-            name: copy.deepcopy(cards) for name, cards in self._init_establishments.items()
-        }
-
-        for alley_name in self._state.keys():
-            self._fill_alley(alley_name)
-
     def get(self, card_name: str):
         alley_name = self._card_to_alley[card_name]
-        for stand in self._state[alley_name]:
+        for stand in self._alleys[alley_name]:
             if len(stand) != 0 and stand[-1] == card_name:
                 card_name = stand.pop()
                 if len(stand) == 0:
@@ -173,10 +240,41 @@ class MarketPlace:
                 return card_name
         assert False, f"Card {card_name} not in marketplace"
 
-    @property
-    def obs(self,):
-        return self._state
+    def as_list(self):
+        for deque_name, deque in self._deques.items():
+            deque_length = len(deque)
+            for i, state_idx in enumerate(self._state_indices["deques"][deque_name]):
+                if i >= deque_length:
+                    self._state[state_idx] = -1
+                else:
+                    self._state[state_idx] = self._card_name_to_num[deque[i]]
 
+        for alley_name, alley in self._alleys.items():
+            for pos, stand in enumerate(alley):
+                if len(stand) == 0:
+                    card = -1
+                else:
+                    card = self._card_name_to_num[stand[0]]
+                self._state[self._state_indices["marketplace"][alley_name][f"pos_{pos}"]["card"]] = card
+                self._state[self._state_indices["marketplace"][alley_name][f"pos_{pos}"]["count"]] = len(stand)
+        return self._state
+    
+    def from_list(self, _list):
+        for deque_name in self._deques.keys():
+            self._deques[deque_name] = []
+            for state_idx in self._state_indices["deques"][deque_name]:
+                if _list[state_idx] == -1:
+                    break
+                self._deques[deque_name].append(self._card_num_to_name[_list[state_idx]])
+
+        for alley_name, alley in self._alleys:
+            for pos in range(len(alley)):
+                card = self._state[self._state_indices["marketplace"][alley_name][f"pos_{pos}"]["card"]]
+                count = self._state[self._state_indices["marketplace"][alley_name][f"pos_{pos}"]["count"]]
+                if card == -1:
+                    self._alleys[alley_name][pos] = deque([])
+                else:
+                    self._alleys[alley_name][pos] = deque([self._card_num_to_name[card]]*count)
             
 
 class MachiKoro:
@@ -200,80 +298,6 @@ class MachiKoro:
             "major": [],
         }
 
-        # # construct state
-
-        # state = []
-        # self._state_indices = {}
-        # self._state_indices["player_info"] = {}
-
-        # for player in range(n_players):
-        #     self._state_indices["player_info"][player] = {}
-
-        #     # cards in city
-        #     self._state_indices["player_info"][player]["cards"] = {}
-        #     for card in self._card_info.keys():
-        #         self._state_indices["player_info"][player]["cards"][card] = len(state)
-        #         state.append(0)
-
-        #     # coins
-        #     self._state_indices["player_info"][player]["coins"] = len(state)
-        #     state.append(3)
-            
-        #     # tech startup investment
-        #     self._state_indices["player_info"][player]["tech_startup_investment"] = len(state)
-        #     state.append(0)
-
-        
-        # # deques
-        # self._card_name_to_num = {name: i for i, (name, info) in enumerate(list(self._card_info.items())) if info["type"] != "Landmarks"}
-        # self._card_num_to_name = {i: name for name, i in self._card_name_to_num.items()}
-
-        # self._1_6_deque = []
-        # self._7_plus_deque = []
-        # self._major_deque = []
-
-        # for card_name, card_info in self._card_info.items():
-        #     if info["type"] == "Landmarks":
-        #         continue
-        #     elif info["type"] == "Major Establishment":
-        #         self._major_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
-        #     elif info["activation"][0] <= 6:
-        #         self._1_6_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
-        #     else:
-        #         self._7_plus_deque.append([self._card_name_to_num[card_name]]*card_info["n_cards"])
-        #     breakpoint()
-        # breakpoint()
-        # random.shuffle(self._1_6_deque)
-        # random.shuffle(self._7_plus_deque)
-        # random.shuffle(self._major_deque)
-
-        # self._state_indices["deques"] = {}
-        # self._state_indices["deques"]["1-6"] = {}
-
-        # self._state_indices["deques"]["1-6"]["cards"] = range(len(state), len(state)+len(self._1_6_deque))
-        # state.extend(self._1_6_deque)
-        # self._state_indices["deques"]["1-6"]["top_card"] = len(state)
-        # state.append(len(state))
-
-        # self._state_indices["deques"]["7_plus"] = {}
-        # self._state_indices["deques"]["7_plus"]["cards"] = range(len(state), len(state)+len(self._7_plus_deque))
-        # state.extend(self._7_plus_deque)
-        # self._state_indices["deques"]["7_plus"]["top_card"] = len(state)
-        # state.append(len(state))
-
-        # self._state_indices["deques"]["major"] = {}
-        # self._state_indices["deques"]["major"]["cards"] = range(len(state), len(state)+len(self._major_deque))
-        # state.extend(self._major_deque)
-        # self._state_indices["deques"]["major"]["top_card"] = len(state)
-        # state.append(len(state))
-        
-        # breakpoint()
-        # self._state_indices["marketplace"] = {}
-        # self._state_indices["marketplace"]["1-6"] = {}
-        # self._state_indices["marketplace"]["7+"] = {}
-        # self._state_indices["marketplace"]["major"] = {}
-        # self._state_indices["marketplace"]["landmarks"] = {}
-
         for card_name, info in self._card_info.items():
             if info["type"] == "Landmarks":
                 continue
@@ -290,9 +314,44 @@ class MachiKoro:
 
         self.reset()
 
+        self._state_indices = {}
+        state_len = 0
+
+        self._state_indices["player_info"] = {}
+        for player in self._player_info.keys():
+            player_info_state = self._player_info[player].as_list()
+            self._state_indices["player_info"][player] = list(range(len(player_info_state)))
+            state_len += len(player_info_state)
+
+        marketplace_state = self._marketplace.as_list()
+        self._state_indices["marketplace"] = list(range(state_len, state_len+len(marketplace_state)))
+        state_len += len(marketplace_state)
+        self._state_indices["current_player_index"] = state_len
+        state_len += 1
+        self._state_indices["current_stage_index"] = state_len
+        state_len += 1
+
+        self._state = np.zeros(state_len)
+
+    def get_state_as_list(self):
+        for player in self._player_info.keys():
+            self._state[self._state_indices["player_info"][player]] = self._player_info[player].as_list()
+        self._state[self._state_indices["marketplace"]] = self._marketplace.as_list()
+        self._state[self._state_indices["current_player_index"]] = self._current_player_index
+        self._state[self._state_indices["current_stage_index"]] = self._current_stage_index
+        return list(self._state)
+
+    def set_state_from_list(self, _list):
+        _array = np.array(_list)
+        for player in self._player_info.keys():
+            self._player_info[player].from_list(list(_array[self._state_indices["player_info"][player]]))
+        self._marketplace.from_list(list(_array[self._state_indices["marketplace"]]))
+        self._current_player_index = _array[self._state_indices["current_player_index"]]
+        self._current_stage_index = _array[self._state_indices["current_stage_index"]]
+
     def reset(self):
 
-        self._marketplace = MarketPlace(self._init_establishments)
+        self._marketplace = MarketPlace(self._init_establishments, self._card_info)
 
         self._player_info = {
             self._player_order[i]: PlayerInfo(self._card_info) for i in range(self._n_players)
@@ -380,6 +439,7 @@ class MachiKoro:
         return False
     
     def invest_in_tech_startup(self):
+        # Not used yet, requires 3rd stage to be added to the stage order.
         assert self._player_info[self.current_player].coins != 0
         self._player_info[self.current_player].invest_in_tech_startup()
     
@@ -466,7 +526,6 @@ class MachiKoro:
                     break
             assert destroyed_landmark is not None
 
-        
         elif card == "Flower Shop" and player == self.current_player:
             self._player_info[player]._coins += self._player_info[player].cards["Flower Orchard"] if not self._player_info[self.current_player].cards["Shopping Mall"] else self._player_info[player].cards["Flower Orchard"]*2
 
@@ -524,7 +583,7 @@ class MachiKoro:
 
         # Not implemented
         # elif card == "Business Center" and player == self.current_player:
-            # trade non major (icon) card with anothe player
+            # trade non major (icon) card with another player
 
         elif card == "Tech Startup" and player == self.current_player and self._player_info[self.current_player].tech_startup_investment > 0:
             for player in self._player_info.keys():
@@ -577,7 +636,7 @@ class GymMachiKoro(gym.Env):
         for i in range(len(self._env._player_info)-1):
             add_player_obs_spaces(f"player_current_p_{i+1}")
 
-        for alley_name, alley in self._env._marketplace._state.items():
+        for alley_name, alley in self._env._marketplace._alleys.items():
             for i in range(len(alley)):
                 # encoding which card is in the deck
                 obs_space[f"marketplace-{alley_name}-{i}-card"] = gym.spaces.MultiBinary(1 + len(self._establishments_to_idx[alley_name])) # +1 so that the 1st entry is reserved for an empty deque
@@ -643,7 +702,15 @@ class GymMachiKoro(gym.Env):
             self._env.reset()
         return self.observation(), self._get_info()
 
+    def get_state_list(self):
+        return copy.deepcopy(self._env.get_state_as_list())
+
+    def set_state_list(self):
+        pass
+        # return copy.deepcopy(self._env.set_state_from_list())
+    
     def get_state(self):
+        self.get_state_list()
         return State(
             player_info = copy.deepcopy(self._env._player_info),
             marketplace = copy.deepcopy(self._env._marketplace),
@@ -652,6 +719,7 @@ class GymMachiKoro(gym.Env):
         )
 
     def set_state(self, state: State):
+        self.set_state_list()
         self._env._player_info = copy.deepcopy(state.player_info)
         self._env._marketplace = copy.deepcopy(state.marketplace)
         self._env._current_player_index = copy.deepcopy(state.current_player_index)
@@ -677,7 +745,7 @@ class GymMachiKoro(gym.Env):
     def _build_action_mask(self):
         action_mask = np.zeros(self.action_space.n)
         cards_in_marketplace = []
-        for alley in self._env._marketplace._state.values():
+        for alley in self._env._marketplace._alleys.values():
             for stand in alley:
                 if len(stand) > 0:
                     cards_in_marketplace.append(stand[-1])
@@ -727,7 +795,7 @@ class GymMachiKoro(gym.Env):
         for i, player in enumerate(self._next_players()):
             self._add_player_obs(player, f"player_current_p_{i+1}")
         
-        for alley_name, alley in self._env._marketplace._state.items():
+        for alley_name, alley in self._env._marketplace._alleys.items():
             for i, stand in enumerate(alley):
                 # encoding which card is in the deck
                 if len(stand) != 0:

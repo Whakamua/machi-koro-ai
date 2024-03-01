@@ -640,7 +640,7 @@ def test_step(env):
     env._current_player_index = 0
 
     for i in range(len(env._player_order)):
-        env._marketplace._state["1-6"][0] = deque(["Ranch"])
+        env._marketplace._alleys["1-6"][0] = deque(["Ranch"])
         env.step("1 dice")
         env.step("Ranch")
         if i == len(env._player_order) - 1:
@@ -655,13 +655,13 @@ def test_marketplace(env):
             n_cards += info["n_cards"]
 
     
-    alleys = list(env._marketplace._state.keys())
+    alleys = list(env._marketplace._alleys.keys())
 
     for _ in range(2):
         n_gotten_cards = 0
         for _ in range(n_cards):
             for alley in alleys:
-                for stand in env._marketplace._state[alley]:
+                for stand in env._marketplace._alleys[alley]:
                     if len(stand) > 0:
                         card_to_get = stand[-1]
                         gotten_card = env._marketplace.get(stand[-1])
@@ -669,7 +669,7 @@ def test_marketplace(env):
                         n_gotten_cards +=1
         
         for alley in alleys:
-            for stand in env._marketplace._state[alley]:
+            for stand in env._marketplace._alleys[alley]:
                 assert len(stand) == 0
         
         assert n_gotten_cards == n_cards
