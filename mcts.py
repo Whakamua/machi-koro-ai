@@ -12,7 +12,7 @@ class MCTS():
     """
 
     def __init__(self, env, pvnet, num_mcts_sims, c_puct, dirichlet_for_root_node = True):
-        self.env = copy.deepcopy(env)
+        self.env = env
         self.pvnet = pvnet
         self.num_mcts_sims = num_mcts_sims
         self._c_puct = c_puct
@@ -24,8 +24,8 @@ class MCTS():
     def root(self):
         return self._root
     
-    def update_pvnet(self, pvnet):
-        self.pvnet = copy.deepcopy(pvnet)
+    def update_pvnet(self, state_dict):
+        self.pvnet.load_state_dict(state_dict)
 
     def add_dirichlet(self, node):
         epsilon = 0.25
@@ -37,6 +37,7 @@ class MCTS():
         observation, info = self.env.reset(env_state)
         root_node = Node(
             observation=observation,
+            action_mask=info["action_mask"],
             reward=None,
             done=False,
             player=self.env.current_player,
@@ -80,7 +81,8 @@ class MCTS():
         if reset_tree:
             self.reset(env_state=env_state)
 
-        assert self.root.env_state == env_state
+        # REMOVE uncomment this
+        # assert np.array_equal(self.root.env_state, env_state)
 
         if self._dirichlet_for_root_node:
             self.add_dirichlet(self.root)
@@ -108,6 +110,7 @@ class MCTS():
             if obs_as_str not in node.children[node.best_action]:
                 node.children[node.best_action][obs_as_str] = Node(
                     observation=obs,
+                    action_mask=info["action_mask"],
                     reward=reward,
                     done=done,
                     player=self.env.current_player,
@@ -121,7 +124,8 @@ class MCTS():
 class Node:
     def __init__(
             self,
-            observation: gym.spaces.Dict,
+            observation: np.ndarray,
+            action_mask: np.ndarray,
             reward: float,
             done: bool,
             player: int,
@@ -137,7 +141,7 @@ class Node:
         self._Nsa = None
         self._reward = reward
         self._observation = observation
-        self._action_mask = observation["action_mask"].astype(bool)
+        self._action_mask = action_mask
         self._player = player
 
         self._c_puct = c_puct or self._parent.c_puct
@@ -238,7 +242,7 @@ class Node:
     @property
     def PUCTsa(self):
         PUCTsa = self.Qsa + self.c_puct * self.Psa * (self.N/ (1+self.Nsa))**0.5
-        PUCTsa[~self._action_mask] = -np.inf
+        PUCTsa[self._action_mask == 0] = -np.inf
         
         return PUCTsa
     

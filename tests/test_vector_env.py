@@ -9,12 +9,16 @@ import gym
 import copy
 
 @pytest.fixture
-def env():
-    return MachiKoro(n_players=4)
+def n_players():
+    return 4
 
 @pytest.fixture
-def gymenv(env):
-    return GymMachiKoro(env)
+def env(n_players):
+    return MachiKoro(n_players=n_players)
+
+@pytest.fixture
+def gymenv(n_players):
+    return GymMachiKoro(n_players=n_players)
 
 @pytest.fixture
 def random_agent(gymenv):
@@ -536,7 +540,7 @@ def test_shopping_mall_cup_icon(env):
 
     for card, info in env._card_info.items():
         for player in env.state_dict()["player_info"].keys():
-            env.state_dict()["player_info"][player]._coins = 10
+            env.state[env._state_indices["player_info"][player]["coins"]] = 10
 
         if card == "Café" or card == "Pizza Joint":
             payment = 1
@@ -556,7 +560,7 @@ def test_shopping_mall_cup_icon(env):
         assert coins - payment == env.state_dict()["player_info"][env.current_player]["coins"]
 
         for player in env.state_dict()["player_info"].keys():
-            env.state_dict()["player_info"][player]._coins = 10
+            env.state[env._state_indices["player_info"][player]["coins"]] = 10
 
         env.add_card(env.current_player, "Shopping Mall")
         
@@ -605,39 +609,39 @@ def test_earn_income_order(env):
     # Test Secondary Industry after Restaurants
     env.add_card(second_player, "Café")
     env.state[env._state_indices["player_info"][env.current_player]["coins"]] = 0
-    env.state_dict()["player_info"][second_player]._coins = 3
+    env.state[env._state_indices["player_info"][second_player]["coins"]] = 3
 
     env._earn_income(3)
 
     assert env.state_dict()["player_info"][env.current_player]["coins"] == 1 # from bakery
-    assert env.state_dict()["player_info"][second_player].coins == 3 # still 3 because Café could get money from current player because it had 0 coins
+    assert env.state_dict()["player_info"][second_player]["coins"] == 3 # still 3 because Café could get money from current player because it had 0 coins
     
     # Test Primary Industry after Restaurants
     env.add_card(second_player, "Sushi Bar")
     env.state[env._state_indices["player_info"][env.current_player]["coins"]] = 0
-    env.state_dict()["player_info"][second_player]._coins = 3
+    env.state[env._state_indices["player_info"][second_player]["coins"]] = 3
 
     env._earn_income(1)
     assert env.state_dict()["player_info"][env.current_player]["coins"] == 1 # from bakery
-    assert env.state_dict()["player_info"][second_player].coins == 4 # only 1 from Wheat Field (default card) because Sushi Bar could get money from current player because it had 0 coins
+    assert env.state_dict()["player_info"][second_player]["coins"] == 4 # only 1 from Wheat Field (default card) because Sushi Bar could get money from current player because it had 0 coins
 
     # Test Major Establishments after Secondary Industry
     env.add_card(second_player, "Mackerel Boat")
     env.add_card(second_player, "Harbor")
     env.add_card(env.current_player, "Tax Office")
-    env.state_dict()["player_info"][second_player]._coins = 9
+    env.state[env._state_indices["player_info"][second_player]["coins"]] = 9
     env.state[env._state_indices["player_info"][env.current_player]["coins"]] = 0
 
     env._earn_income(8)
 
-    assert env.state_dict()["player_info"][second_player].coins == 6 # got 3 from Mackerel Boat, then lost half through tax office of second player
+    assert env.state_dict()["player_info"][second_player]["coins"] == 6 # got 3 from Mackerel Boat, then lost half through tax office of second player
     assert env.state_dict()["player_info"][env.current_player]["coins"] == 6 # got 12 / 2 from second player through tax office
 
 def test_step(env):
     env._current_player_index = 0
 
     for i in range(len(env._player_order)):
-        env._marketplace._alleys["1-6"][0] = deque(["Ranch"])
+        env.state[env._state_indices["marketplace"]["1-6"]["pos_0"]["card"]] = env._card_name_to_num["Ranch"]
         env.step("1 dice")
         env.step("Ranch")
         if i == len(env._player_order) - 1:
@@ -651,24 +655,24 @@ def test_marketplace(env):
         if info["type"] != "Landmarks":
             n_cards += info["n_cards"]
 
-    
-    alleys = list(env._marketplace._alleys.keys())
-
     for _ in range(2):
         n_gotten_cards = 0
-        for _ in range(n_cards):
-            for alley in alleys:
-                for stand in env._marketplace._alleys[alley]:
-                    if len(stand) > 0:
-                        card_to_get = stand[-1]
-                        gotten_card = env._marketplace.get(stand[-1])
-                        assert gotten_card == card_to_get
+        for i in range(n_cards):
+            for alley_name, alley in env._state_indices["marketplace"].items():
+                for stand_name, stand in alley.items():
+                    n_cards_in_stand = copy.deepcopy(env.state[stand["count"]])
+                    if n_cards_in_stand > 0:
+                        card_to_get = env._card_num_to_name[env.state[stand["card"]]]
+                        env.remove_card_from_marketplace(card_to_get)
+                        if n_cards_in_stand > 2:
+                            assert env._card_num_to_name[env.state[stand["card"]]] == card_to_get
+                            assert env.state[stand["count"]] == n_cards_in_stand - 1
                         n_gotten_cards +=1
+
         
-        for alley in alleys:
-            for stand in env._marketplace._alleys[alley]:
-                assert len(stand) == 0
-        
+        for alley_name, alley in env._state_indices["marketplace"].items():
+            for stand_name, stand in alley.items():
+                assert env.state[stand["count"]] == 0
         assert n_gotten_cards == n_cards
         env.reset()
     
@@ -683,7 +687,7 @@ def test_gym_env_obs(gymenv):
     for i, (obs_key, obs_value) in enumerate(gymenv.observation_space.items()):
         assert obs_key == obs_key_list[i]
         if isinstance(obs_value, gym.spaces.Box) or isinstance(obs_value, gym.spaces.Discrete):
-            assert isinstance(obs[obs_key_list[i]], int)
+            assert isinstance(obs[obs_key_list[i]], np.int64)
         else:
             assert obs_value.n == len(obs[obs_key_list[i]])
             assert sum(obs[obs_key_list[i]]) == 1

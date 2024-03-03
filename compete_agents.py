@@ -8,6 +8,7 @@ from mcts_agent import MCTSAgent
 import cProfile
 import copy
 import gym
+import time
 
 def deepcopy_obs(obs_space, obs):
     obs_flt = gym.spaces.flatten(obs_space, obs)
@@ -15,6 +16,7 @@ def deepcopy_obs(obs_space, obs):
     c2 = copy.deepcopy(obs_flt)
 
 def main():
+    time_start = time.time()
     # env = MachiKoro(n_players=2)
     # env = GymMachiKoro(env)
     env = VMachiKoro(n_players=2)
@@ -27,8 +29,8 @@ def main():
 
     agents = {
         # "player 0": MCTSAgent(env.observation_space, env.action_space),
-        0: RandomAgent(env.observation_space, env.action_space),
-        1: RandomAgent(env.observation_space, env.action_space),
+        "player 0": RandomAgent(env.observation_space, env.action_space),
+        "player 1": RandomAgent(env.observation_space, env.action_space),
     #     "player 2": RandomAgent(env.observation_space, env.action_space),
     #     "player 3": RandomAgent(env.observation_space, env.action_space)
     }
@@ -41,7 +43,7 @@ def main():
         count = 0
         steps = 0
         while not done:
-            print(steps)
+            env.set_state(info["state"])
             action, probs = agents[env.current_player].compute_action(obs, info["state"])    
             # previous_env = copy.deepcopy(env)
             # action_actually_allowed = True
@@ -64,13 +66,14 @@ def main():
             cumulative_steps += 1
 
             if done:
-                ranking = [1 if player == env.current_player else 2 for player in env.player_info.keys()]
+                ranking = [1 if player == env.current_player else 2 for player in env.player_order]
                 for i, rank in enumerate(ranking):
                     if rank == 1:
                         wins[i] += 1
                 player_elo = elo.get_new_ratings(player_elo, result_order=ranking)
                 print(f"game {game} | steps: {steps} | elo: {player_elo} | wins: {wins}")
     print(f"avg_steps: {cumulative_steps/n_games}")
+    print(f"time taken: {time.time() - time_start}")
     # game 9999 | elo: [1035.11131277  995.44385084  985.17885556  984.26598084], wins: [2607, 2594, 2433, 2366]
 
 if __name__ == "__main__":

@@ -28,9 +28,13 @@ class PVNet(nn.Module):
         self.fclogits = nn.Linear(10, num_outputs)
         self.fcvalue = nn.Linear(10, 1)
 
+
+        self.is_trained = False
+        
         self.is_trained = False
         self.KLDiv = torch.nn.KLDivLoss(reduction="batchmean")
-
+        # REMOVE
+        self.ones = np.ones(self.action_space.n)/self.action_space.n
     def forward(self, x):
         # x = torch.relu(self.fc1(x))
         
@@ -46,8 +50,8 @@ class PVNet(nn.Module):
         return logits, value
 
     def predict(self, observation, flattened=False):
-        if not self.is_trained:
-            return np.ones(self.action_space.n)/self.action_space.n, 0
+        # REMOVE
+        return self.ones, 0
         if not flattened:
             observation = gym.spaces.flatten(self.observation_space, observation)
         input = torch.tensor(observation).unsqueeze(0).to(torch.float32)
@@ -62,11 +66,11 @@ class PVNet(nn.Module):
         value_loss = torch.nn.functional.mse_loss(value_preds, torch.tensor(value_targets).to(torch.float32))
         return policy_loss + value_loss
 
-    def train(self, buffer, batch_size):
+    def train(self, buffer, batch_size, epochs):
         buffer.compute_values()
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
 
-        for epoch in range(100):
+        for epoch in range(epochs):
             batches = buffer.get_random_batches(batch_size = batch_size, exclude_terminal_states=True)
             for batch in batches:
                 obss, actions, rewards, next_obss, dones, player_ids, action_masks, values, probs = batch
@@ -82,8 +86,6 @@ class PVNet(nn.Module):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-        self.is_trained = True
-        return self
 
 class MCTSAgent:
     def __init__(
@@ -91,19 +93,16 @@ class MCTSAgent:
             env,
             num_mcts_sims,
             c_puct,
-            pvnet = None,
+            pvnet,
             dirichlet_to_root_node = True
     ):
         self.observation_space = env.observation_space
         self.action_space = env.action_space
-        pvnet = pvnet or PVNet(observation_space=self.observation_space, action_space=self.action_space)
         self.mcts = MCTS(env, pvnet, num_mcts_sims, c_puct, dirichlet_to_root_node)
         warnings.warn("Not using any temperature in probs, might need that for first n actions")
 
-    def update_pvnet(self, pvnet):
-        if isinstance(pvnet, str):
-            pvnet = torch.load(pvnet)
-        self.mcts.update_pvnet(pvnet)
+    def update_pvnet(self, state_dict):
+        self.mcts.update_pvnet(state_dict)
 
     def reset(self, env_state):
         self.mcts.reset(env_state=env_state)

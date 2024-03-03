@@ -1,4 +1,6 @@
 from env import GymMachiKoro, MachiKoro
+from env_vector_state import GymMachiKoro as VGymMachiKoro
+from env_vector_state import MachiKoro as VMachiKoro
 from multielo import MultiElo
 from random_agent import RandomAgent
 from mcts_agent import MCTSAgent
@@ -13,6 +15,10 @@ import pickle
 import time
 import random, os
 from ray.util.actor_pool import ActorPool
+import cProfile
+from mcts_agent import PVNet
+from typing import Optional
+from collections import OrderedDict
 
 def seed_all(seed):
     random.seed(seed)
@@ -23,19 +29,29 @@ def seed_all(seed):
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = True
 
-@ray.remote
+# REMOVE
+# @ray.remote
 class MachiKoroActor:
-    def __init__(self, agents, buffer_capacity, env, worker_id):
+    def __init__(self, env_cls, env_kwargs, num_mcts_sims, c_puct, pvnet_cls, pvnet_kwargs, buffer_capacity, n_players, worker_id):
         self._worker_id = worker_id
-        self._agents = agents
         self._buffer_capacity = buffer_capacity
-        self._env = env
+        self._env = env_cls(**env_kwargs)
+
+        self._agents = {
+            f"player {i}": MCTSAgent(env_cls(**env_kwargs), num_mcts_sims=num_mcts_sims, c_puct=c_puct, pvnet=pvnet_cls(**pvnet_kwargs))
+            for i in range(n_players)
+        }
+        assert list(self._agents.keys()) == self._env.player_order
         seed_all(self._worker_id)
 
-    def update_pvnet(self, updated_pvnet):
-        [agent.update_pvnet(updated_pvnet) for agent in self._agents.values()]
+    def update_pvnet(self, state_dict):
+        print("worker", self._worker_id)
+        for name, agent in self._agents.items():
+            agent.update_pvnet(state_dict)
 
-    def play_game(self, game_id):
+    def play_game(self, game_id, pvnet_state_dict: Optional[OrderedDict] = None):
+        if pvnet_state_dict is not None:
+            self.update_pvnet(pvnet_state_dict)
 
         buffer = Buffer(observation_space=self._env.observation_space, action_space=self._env.action_space, capacity=self._buffer_capacity)
 
@@ -47,14 +63,14 @@ class MachiKoroActor:
 
         done = False
         obs, info = self._env.reset()
-        [agent.reset(info["state"]) for agent in agents.values()]
+        [agent.reset(info["state"]) for agent in self._agents.values()]
         game += 1
 
         while not done:
-            action, probs = agents[self._env.current_player].compute_action(obs, info["state"])
+            action, probs = self._agents[self._env.current_player].compute_action(obs, info["state"])
             # print(f"player {self._env.current_player_index} played {self._env._action_idx_to_str[action]} | coins = {self._env.player_info[self._env.current_player].coins}")
             # print(f"probs {' '.join(map(str, probs.round(2)))}")
-            print(f"worker: {self._worker_id} | game: {game_id} | buffer_size: {buffer.size} | player {self._env.current_player_index} played {self._env._action_idx_to_str[action]} | coins = {self._env.player_info[self._env.current_player].coins}")
+            print(f"worker: {self._worker_id} | game: {game_id} | steps: {steps} | buffer_size: {buffer.size} | player {self._env.current_player_index} played {self._env._action_idx_to_str[action]} | coins = {self._env.state_dict()['player_info'][self._env.current_player]['coins']}")
             next_obs, reward, done, truncated, info = self._env.step(action)     
             steps += 1
             # if buffer._size + 1 == buffer._capacity:
@@ -67,6 +83,7 @@ class MachiKoroActor:
                 next_obs=next_obs,
                 done=done,
                 probs=probs,
+                info=info,
                 )
             
             if steps % 100 == 0:
@@ -81,42 +98,81 @@ class MachiKoroActor:
 
             obs = next_obs
 
-if __name__ == "__main__":
+def main():
 
     # with open("src/checkpoints/9.pkl", "rb") as file:
     #     buffer = pickle.load(file)
     # model = torch.load("checkpoints_3_static/2.pt")
     # breakpoint()
 
-    ray.init()
-    env = MachiKoro(n_players=2)
-    env = GymMachiKoro(env)
-
-    agents = {
-        f"player 0": MCTSAgent(env=env, num_mcts_sims=100, c_puct=2),
-        f"player 1": MCTSAgent(env=env, num_mcts_sims=100, c_puct=2),
+    # REMOVE uncomment
+    # ray.init()
+    n_players = 2
+    env_cls = VGymMachiKoro
+    env_kwargs = {"n_players": n_players}
+    temp_env = env_cls(**env_kwargs)
+    observation_space = temp_env.observation_space
+    action_space = temp_env.action_space
+    pvnet_cls = PVNet
+    pvnet_kwargs = {
+        "observation_space": observation_space,
+        "action_space": action_space,
     }
+    pvnet_for_training = PVNet(**pvnet_kwargs)
+    # env = MachiKoro(n_players=2)
+    # env = GymMachiKoro(env)
+    # env = VMachiKoro(n_players=n_players)
+    # env = VGymMachiKoro(env)
+
+    # agents = {
+    #     f"player 0": MCTSAgent(env=env, num_mcts_sims=10, c_puct=2),
+    #     f"player 1": MCTSAgent(env=env, num_mcts_sims=10, c_puct=2),
+    # }
     # model = torch.load("checkpoints_semi_small_doing_well/10.pt")
     # [agent.update_pvnet(model) for agent in agents.values()]
-    assert list(agents.keys()) == env.player_order
-
-
+    # breakpoint()
     buffer_capacity = 1000
-    actor_pool = ActorPool([MachiKoroActor.remote(agents, buffer_capacity, env, i) for i in range(7)])
-    n_games_per_iteration = 150
 
-    for i in range(100):
+    # REMOVE uncomment
+    # actor_pool = ActorPool(
+    #     [
+    #         MachiKoroActor.remote(
+    #             env_cls=env_cls,
+    #             env_kwargs=env_kwargs,
+    #             num_mcts_sims=25,
+    #             c_puct=2,
+    #             pvnet_cls=pvnet_cls,
+    #             pvnet_kwargs=pvnet_kwargs,
+    #             buffer_capacity=buffer_capacity,
+    #             n_players=n_players,
+    #             worker_id=i
+    #         ) for i in range(7)
+    #     ]
+    # )
+    ## REMOVE
+    actor = MachiKoroActor(
+        env_cls=env_cls,
+        env_kwargs=env_kwargs,
+        num_mcts_sims=10,
+        c_puct=2,
+        pvnet_cls=pvnet_cls,
+        pvnet_kwargs=pvnet_kwargs,
+        buffer_capacity=buffer_capacity,
+        n_players=n_players,
+        worker_id=0
+    )
+    
+    n_games_per_iteration = 1
+
+    for i in range(1):
         t1 = time.time()
-
-        list(actor_pool.map_unordered(
-            lambda a, v: a.update_pvnet.remote(v),
-            agents.values(),
-        ))
-
-        actor_generator = actor_pool.map_unordered(
-            lambda a, v: a.play_game.remote(v),
-            np.arange(n_games_per_iteration),
-        )
+        pvnet_state_dict = pvnet_for_training.state_dict()
+        # REMOVE uncomment
+        # actor_generator = actor_pool.map_unordered(
+        #     lambda a, v: a.play_game.remote(v, pvnet_state_dict),
+        #     np.arange(n_games_per_iteration),
+        # )
+        actor_generator = [actor.play_game(i, pvnet_state_dict) for i in np.arange(n_games_per_iteration)]
 
         buffers = []
         steps_collected = 0
@@ -131,8 +187,8 @@ if __name__ == "__main__":
         #     agents, buffer_capacity, gamma, worker, max_games) for worker in range(7)]
         # buffers = ray.get(buffer_futures)
         buffer = BigBuffer(
-            observation_space=env.observation_space,
-            action_space=env.action_space
+            observation_space=observation_space,
+            action_space=action_space
         )
 
         # buffer = get_trajectories_machi_koro(agents, buffer_capacity, gamma, 0, max_games)
@@ -145,7 +201,15 @@ if __name__ == "__main__":
             os.makedirs(checkpoint_dir)
         with open(f"{checkpoint_dir}/{i}.pkl","wb") as file:
             pickle.dump(buffer, file)
-        updated_pvnet = agents["player 0"].train(buffer=buffer, batch_size=64)
+        pvnet_for_training.train(buffer=buffer, batch_size=64, epochs=1)
 
-        [agent.update_pvnet(updated_pvnet) for agent in agents.values()]
-        torch.save(updated_pvnet, f"{checkpoint_dir}/{i}.pt")
+        # [agent.update_pvnet(updated_pvnet) for agent in agents.values()]
+        torch.save(pvnet_for_training, f"{checkpoint_dir}/{i}.pt")
+
+
+if __name__ == "__main__":
+    profiler = cProfile.Profile()
+    profiler.enable()
+    main()
+    profiler.disable()
+    profiler.dump_stats("self_play.prof")

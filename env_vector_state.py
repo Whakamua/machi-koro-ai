@@ -313,10 +313,11 @@ class MachiKoro:
         if action != "Build nothing":
             self.buy_card(self.current_player, action)
             if self._card_info[action]["type"] != "Landmarks":
-                self.get_card_from_marketplace(action)
+                self.remove_card_from_marketplace(action)
+            self.add_card(self.current_player, action)
 
 
-    def get_card_from_marketplace(self, card):
+    def remove_card_from_marketplace(self, card):
         for alley in self._state_indices["marketplace"].values():
             for stand in alley.values():
                 if self._card_num_to_name[self.state[stand["card"]]] == card:
@@ -325,6 +326,8 @@ class MachiKoro:
                     if self.state[stand["count"]] == 0:
                         self.state[stand["card"]] = -1
                         self.fill_alleys()
+                    return
+        assert False, f"Could not find card {card} in marketplace"
 
     def fill_alleys(self):
         for alley_name, alley in self._state_indices["marketplace"].items():
@@ -333,7 +336,7 @@ class MachiKoro:
                 continue
             
             while True:
-                if not self.alley_needs_card(alley_name):
+                if not self.alley_needs_card(alley_name) or self.state[self._state_indices["deques"][alley_name]["top_card_idx"]] == -1:
                     break
                 self.add_card_to_alley(alley_name)
                 
@@ -555,8 +558,8 @@ class MachiKoro:
                     self._payment(player, self.current_player, self.player_tech_startup_investment(self.current_player))
 
 class GymMachiKoro(gym.Env):
-    def __init__(self, env: MachiKoro):
-        self._env = env
+    def __init__(self, n_players: int):
+        self._env = MachiKoro(n_players=n_players)
 
         actions = ["1 dice", "2 dice"]
         [actions.append(action) for action in self.card_info.keys()]
@@ -587,15 +590,23 @@ class GymMachiKoro(gym.Env):
 
         obs_space = OrderedDict()
         self._obs = OrderedDict()
-        assert False, "Hier verder!!! Create obs space here, and overwrite in self.observation so to re-use memory. In self.observation remove things like self._obs[...] = np.zeros and change to self._obs[...] *= 0"
-        def add_player_obs_spaces(player):
+        self._obs_indices = {}
+        self._obs_len = 0
+        # assert False, "Hier verder!!! Create obs space here, and overwrite in self.observation so to re-use memory." 
+        # "In self.observation remove things like self._obs[...] = np.zeros and change to self._obs[...] *= 0"
+        def add_player_obs_spaces(player_obs_name):
             for card in self.card_info.keys():
                 if self.card_info[card]["type"] == "Landmarks":
-                    obs_space[f"{player}-{card}"] = gym.spaces.MultiBinary(2)
+                    space_len = 2
                 else:
                     max_cards = self.card_info[card]["n_cards"]
-                    obs_space[f"{player}-{card}"] = gym.spaces.MultiBinary(1 + max_cards + (card == "Wheat Field") + (card == "Bakery")) # + 1 so that the 1st entry is reserved for 0 cards
-            obs_space[f"{player}-coins"] = gym.spaces.Box(low=0, high=np.inf)
+                    space_len = 1 + max_cards + (card == "Wheat Field") + (card == "Bakery") # + 1 so that the 1st entry is reserved for 0 cards
+
+                self._obs_indices[f"{player_obs_name}-{card}"] = np.arange(space_len) + self._obs_len
+                self._obs_len += space_len
+
+            self._obs_indices[f"{player_obs_name}-coins"] = np.arange(1) + self._obs_len
+            self._obs_len += 1
         
         add_player_obs_spaces("current_player")
 
@@ -603,17 +614,28 @@ class GymMachiKoro(gym.Env):
         for i in range(self._env._n_players-1):
             add_player_obs_spaces(f"player_current_p_{i+1}")
 
-        for alley_name, alley in self._env._marketplace._state.items():
-            for i in range(len(alley)):
+        for alley_name, alley in self._env._state_indices["marketplace"].items():
+            for pos, stand in alley.items():
                 # encoding which card is in the deck
-                obs_space[f"marketplace-{alley_name}-{i}-card"] = gym.spaces.MultiBinary(len(self._establishments_to_idx[alley_name]))
-
+                space_len = len(self._establishments_to_idx[alley_name])
+                self._obs_indices[f"marketplace-{alley_name}-{pos}-card"] = np.arange(space_len) + self._obs_len
+                self._obs_len += space_len
                 # encoding how many cards are in the deck
-                obs_space[f"marketplace-{alley_name}-{i}-amount"] = gym.spaces.MultiBinary(5+1 if alley_name == "major" else 6+1) # major have max 5 cards and others have max 6 cards. +1 is to account for and empty deque
-        obs_space["current_player_index"] = gym.spaces.Discrete(self.n_players)
-        obs_space["current_stage_index"] = gym.spaces.Discrete(self._env._n_stages)
-        obs_space["action_mask"] = gym.spaces.MultiBinary(self.action_space.n)
-        self.observation_space = gym.spaces.Dict(obs_space)
+                space_len = 5+1 if alley_name == "major" else 6+1 # major have max 5 cards and others have max 6 cards. +1 is to account for and empty deque
+                self._obs_indices[f"marketplace-{alley_name}-{pos}-amount"] = np.arange(space_len) + self._obs_len
+                self._obs_len += space_len
+        self._obs_indices["current_player_index"] = np.arange(self._env._n_players) + self._obs_len
+        self._obs_len += self._env._n_players
+        self._obs_indices["current_stage_index"] = np.arange(self._env._n_stages) + self._obs_len
+        self._obs_len += self._env._n_stages
+
+        self._obs_indices["action_mask"] = np.arange(self.action_space.n) + self._obs_len
+        self._obs_len += len(self.action_mask)
+
+        self.observation_space = gym.spaces.MultiBinary(self._obs_len)
+        del self._obs_len
+
+        self._obs = np.zeros(self.observation_space.n)
 
     @property
     def card_info(self):
@@ -654,11 +676,18 @@ class GymMachiKoro(gym.Env):
     def diceroll(self, n_dice):
         return self._env._diceroll(n_dice)
 
-    def _get_info(self):
+    def _get_info(self, action_mask: Optional[np.ndarray] = None):
+        """
+        state and action_mask don't need a deepcopy because they have already been deepcopied
+        state in the return statement of self.get_state()
+        action_mask when passed as an argument, is taken from the observation, which is deepcopied 
+        already.
+        """
         return {
             "state": self.get_state(),
-            "player_index": self.current_player_index,
-            "is_stochastic": self._env.current_stage == "diceroll"
+            "current_player_index": copy.deepcopy(self.current_player_index),
+            "is_stochastic": self._env.current_stage == "diceroll",
+            "action_mask": action_mask if action_mask is not None else copy.deepcopy(self.action_mask)
         }
 
     def reset(self, state: dict | None = None):
@@ -666,24 +695,38 @@ class GymMachiKoro(gym.Env):
             self.set_state(state)
         else:  
             self._env.reset()
-        return self.observation(), self._get_info()
+        obs = self.observation()
+        # REMOVE
+        self.count = 0
+        self._info = self._get_info(action_mask=obs[self._obs_indices["action_mask"]])
+        #
+        return self.observation(), self._get_info(action_mask=obs[self._obs_indices["action_mask"]])
 
     def get_state(self):
+        # REMOVE
+        return self._env.state
+        #
         return copy.deepcopy(self._env.state)
     
     def state_dict(self, state: Optional[np.array] = None):
         return copy.deepcopy(self._env.state_dict(state))
 
     def set_state(self, state):
+        # REMOVE
+        return
         self._env.state = copy.deepcopy(state)
 
     def step(self, action, state: dict | None = None):
+        # REMOVE
+        self.count+=1
+        return self._obs, self.count==100, self.count==100, False, self._info
+        #
         if state:
             self.set_state(state)
         
         winner = self._env.step(self._action_idx_to_str[action])
         obs = self.observation()
-        info = self._get_info()
+        info = self._get_info(action_mask=obs[self._obs_indices["action_mask"]])
         return obs, int(winner), winner, False, info
 
     def _diceroll_action_mask(self):
@@ -743,18 +786,17 @@ class GymMachiKoro(gym.Env):
     def _add_player_obs(self, player, player_obs_name):
         for card, amount_idx in self._env._state_indices["player_info"][player]["cards"].items():
             amount = self._env.state[amount_idx]
-            if self.card_info[card]["type"] == "Landmarks":
-                self._obs[f"{player_obs_name}-{card}"] = np.array([not amount, amount]).astype(int)
-            else:
-                max_cards = self.card_info[card]["n_cards"]
-                self._obs[f"{player_obs_name}-{card}"] = np.zeros(max_cards + 1 + (card == "Wheat Field") + (card == "Bakery"))
-                self._obs[f"{player_obs_name}-{card}"][amount] = 1
-        self._obs[f"{player_obs_name}-coins"] = self._env.state[self._env._state_indices["player_info"][player]["coins"]]
+            self._obs[self._obs_indices[f"{player_obs_name}-{card}"]][amount] = 1
+            
+        self._obs[self._obs_indices[f"{player_obs_name}-coins"]] = self._env.state[
+            self._env._state_indices["player_info"][player]["coins"]
+        ]
 
     def next_players(self):
         return self._env.next_players
  
     def observation(self):
+        self._obs *= 0
         # return copy.deepcopy(self.obs)
         # assert False, "Hier verder! Construct observation directly from state using self._env.observable_indices"
         self._add_player_obs(self.current_player, "current_player")
@@ -765,20 +807,18 @@ class GymMachiKoro(gym.Env):
         for alley_name, alley in self._env._state_indices["marketplace"].items():
             for pos, stand in alley.items():
                 # encoding which card is in the deck
-                self._obs[f"marketplace-{alley_name}-{pos}-card"] = np.zeros(len(self._establishments_to_idx[alley_name]))
                 if self._env.state[stand["count"]] != 0:
                     card = self._env._card_num_to_name[self._env.state[stand["card"]]]
-                    self._obs[f"marketplace-{alley_name}-{pos}-card"][self._establishments_to_idx[alley_name][card]] = 1
+                    self._obs[self._obs_indices[f"marketplace-{alley_name}-{pos}-card"][self._establishments_to_idx[alley_name][card]]] = 1
                 else:
-                    self._obs[f"marketplace-{alley_name}-{pos}-card"][0] = 1
+                    self._obs[self._obs_indices[f"marketplace-{alley_name}-{pos}-card"][0]] = 1
 
                 # encoding how many cards are in the deck
-                self._obs[f"marketplace-{alley_name}-{pos}-amount"] = np.zeros(5+1 if alley_name == "major" else 6+1) # major have max 5 cards and others have max 6 cards. +1 is to account for and empty deque
-                self._obs[f"marketplace-{alley_name}-{pos}-amount"][self._env.state[stand["count"]]] = 1
-        self._obs["current_player_index"] = self._env.current_player_index
-        self._obs["current_stage_index"] = self._env.current_stage_index
+                self._obs[self._obs_indices[f"marketplace-{alley_name}-{pos}-amount"][self._env.state[stand["count"]]]] = 1
+        self._obs[self._obs_indices["current_player_index"][self._env.current_player_index]] = 1
+        self._obs[self._obs_indices["current_stage_index"][self._env.current_player_index]] = 1
 
-        self._obs["action_mask"] = self.action_mask
+        self._obs[self._obs_indices["action_mask"]] = self.action_mask
         return copy.deepcopy(self._obs)
     
     def flattened_obs(self,):

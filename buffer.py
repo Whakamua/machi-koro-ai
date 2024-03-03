@@ -6,8 +6,7 @@ import copy
 class Buffer:
     def __init__(self, observation_space, action_space, capacity: int | None = None):
         assert isinstance(action_space, Discrete), "other action spaces are not supported due to the reset method assuming a dimension of 1" 
-        assert isinstance(observation_space["action_mask"], MultiBinary)
-        assert isinstance(observation_space, Dict)
+        assert isinstance(observation_space, MultiBinary)
         self._observation_space = observation_space
         self._action_space = action_space
         self._capacity = capacity
@@ -76,7 +75,7 @@ class Buffer:
         self._next_obss = np.zeros((capacity, flatten_space(self._observation_space).shape[0]))
         self._dones = np.zeros((capacity, 1))
         self._player_ids = np.zeros((capacity, 1))
-        self._action_masks = np.zeros((capacity, self._observation_space["action_mask"].n))
+        self._action_masks = np.zeros((capacity, self._action_space.n))
         self._values = np.zeros((capacity, 1))
         self._probs = np.zeros((capacity, self._action_space.n))
         self._episode_starts = {}
@@ -85,7 +84,7 @@ class Buffer:
         self._episode_number = 0
         self._new_episode = True
 
-    def add(self, obs, action, reward, next_obs, done, probs):
+    def add(self, obs, action, reward, next_obs, done, probs, info):
         assert self._size < self._capacity
         index = self._size
         self[index] = (
@@ -94,8 +93,8 @@ class Buffer:
             reward,
             flatten(self._observation_space, next_obs),
             done,
-            obs["current_player_index"],
-            obs["action_mask"],
+            info["current_player_index"],
+            info["action_mask"],
             0,
             probs
         )
