@@ -7,12 +7,7 @@ import copy
 
 @pytest.fixture
 def observation_space():
-    return Dict(
-        {
-        "current_player_index": Discrete(2),
-        "action_mask": MultiBinary(5)
-        }
-    )
+    return MultiBinary(6)
 
 @pytest.fixture
 def action_space():
@@ -30,12 +25,14 @@ def test_exclude_terminal_states(buffer, observation_space, action_space):
     init_dones = np.array([0,0,1,0,0,1,0,1]).astype(bool)
     for done in init_dones:
         buffer.add(
-            obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            obs = np.array([1, 0, 0, 0, 0, 1]),
             action = action_space.sample(),
             reward = 0,
-            next_obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            next_obs = np.array([1, 0, 0, 0, 0, 1]),
             done = done,
             probs = np.ones(action_space.n)/action_space.n,
+            current_player_index=1,
+            action_mask=np.array([1, 0, 0, 0, 0]),
             )
     obss,_,_,_,_,_,_,_,_ = buffer.sample(batch_size=len(init_dones))
     assert len(obss) == len(init_dones)
@@ -64,27 +61,31 @@ def test_buffer(buffer, observation_space, action_space):
 
         for j in range(4):
             buffer.add(
-                obs = OrderedDict([('action_mask', np.array([count, 0, 0, 0, 0])), ('current_player_index', player_first_4_turns)]),
+                obs = np.array([count, 0, 0, 0, 0, player_first_4_turns]),
                 action = action_space.sample(),
                 reward = 0,
-                next_obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', player_first_4_turns if j < 3 else player_last_turn)]),
+                next_obs = np.array([1, 0, 0, 0, 0, player_first_4_turns if j < 3 else player_last_turn]),
                 done = False,
                 probs = np.ones(action_space.n)/action_space.n,
+                current_player_index=player_first_4_turns if j < 3 else player_last_turn,
+                action_mask=np.array([1, 0, 0, 0, 0]),
                 )
             count+=1
         buffer.add(
-            obs = OrderedDict([('action_mask', np.array([count, 0, 0, 0, 0])), ('current_player_index', player_last_turn)]),
+            obs = np.array([count, 0, 0, 0, 0, player_last_turn]),
             action = action_space.sample(),
             reward = 1,
-            next_obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', player_last_turn)]),
+            next_obs = np.array([1, 0, 0, 0, 0, player_last_turn]),
             done = True,
             probs = np.ones(action_space.n)/action_space.n,
+            current_player_index=player_last_turn,
+            action_mask=np.array([1, 0, 0, 0, 0]),
             )
         count+=1
         
     buffer.compute_values()
     buffer.sample(batch_size=5)
-    assert np.array_equal(buffer.values, np.array([[1.], [1.], [1.], [1.], [0.], [-1.], [-1.], [-1.], [-1.], [0.]]))
+    assert np.array_equal(buffer.values, np.array([[1.], [1.], [1.], [1.], [0.], [-1.], [-1.], [-1.], [1.], [0.]]))
     assert np.array_equal(buffer.rewards, np.array([[0.], [0.], [0.], [0.], [1.], [0.], [0.], [0.], [0.], [1.]]))
 
     split = 0.2
@@ -111,12 +112,14 @@ def test_combine_buffer(buffer, action_space):
 
     for i in range(10):
         buffer.add(
-            obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            obs = np.array([1, 0, 0, 0, 0, 1]),
             action = action_space.sample(),
             reward = int((i-1) % 3 == 0),
-            next_obs = OrderedDict([('action_mask', np.array([1, 0, 0, 0, 0])), ('current_player_index', 1)]),
+            next_obs = np.array([1, 0, 0, 0, 0, 1]),
             done = (i-1) % 3 == 0,
             probs = np.ones(action_space.n)/action_space.n,
+            current_player_index=1,
+            action_mask=np.array([1, 0, 0, 0, 0])
         )
     buffer2 = copy.deepcopy(buffer)
     bigbuffer = buffer.get_big_buffer()
@@ -144,3 +147,33 @@ def test_combine_buffer(buffer, action_space):
         [0],
         [0]
     ]))
+
+def test_split_buffer(buffer, action_space):
+    for i in range(10):
+        buffer.add(
+            obs = np.array([i, 0, 0, 0, 0, 1]),
+            action = action_space.sample(),
+            reward = int((i-1) % 3 == 0),
+            next_obs = np.array([1, 0, 0, 0, 0, 1]),
+            done = (i-1) % 3 == 0,
+            probs = np.ones(action_space.n)/action_space.n,
+            current_player_index=1,
+            action_mask=np.array([1, 0, 0, 0, 0])
+        )
+    
+    buffer1, buffer2 = buffer.split_buffer_by_episode(0.2)
+
+    assert len(buffer1[:]) == len(buffer2[:])
+
+    for i in range(len(buffer1[:])):
+        assert buffer1[:][i].shape[0] + buffer2[:][i].shape[0] == buffer[:][i].shape[0]
+    
+    buffer_episode_lengths = list(buffer._episode_lengths.values())
+    for episode_len in buffer1._episode_lengths.values():
+        assert episode_len in buffer_episode_lengths
+        del buffer_episode_lengths[buffer_episode_lengths.index(episode_len)]
+    for episode_len in buffer2._episode_lengths.values():
+        assert episode_len in buffer_episode_lengths
+        del buffer_episode_lengths[buffer_episode_lengths.index(episode_len)]
+    
+    assert not buffer_episode_lengths

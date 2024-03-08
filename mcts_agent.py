@@ -5,19 +5,95 @@ import torch
 import warnings
 
 from mcts import MCTS
+import itertools
+
+
+class MultiDimensionalOneHot:
+    def __init__(self, values):
+        # np array where each row is padded with nans
+        self.values = torch.tensor(list(itertools.zip_longest(*values, fillvalue=np.nan))).T
+
+        # the one_hot_start_indices represent the indices in a flattened array. Each index is the
+        # start index of a onehot dimension.
+        values_lengths = torch.sum(~torch.isnan( self.values), axis=1)
+        self.one_hot_start_indices = values_lengths.cumsum(0) - values_lengths
+        
+        # the lenght of the flattened onehot array
+        self.one_hot_len = sum(map(len, values))
+        # self.start_indices = (np.cumsum(n_elements) - n_elements)
+
+    def to_onehot(self, array):
+        # one hot initialized by zeros
+        one_hot = torch.zeros((len(array), self.one_hot_len))
+
+        # The following line figures out what indices in the flattened onehot array need to be 
+        # marked as `1`. It does that by taking the array and figure out the indices at which it
+        # equals the self.values array. This results 3 array but only the last one is interesting,
+        # therefore [-1] is used. This one is flattened for each row in `array` however, so it is
+        # reshaped to (len(array), len(self.values)). Now only the indices for each row in 
+        # self.values are known, so the one_hot_start_indices are added to find the indices in the
+        # flattened one_hot.
+        try:
+            onehot_indices = torch.where(self.values == array[:,:,None])[-1].reshape(len(array), len(self.values)) + self.one_hot_start_indices
+        except:
+            # [print(row) for row in torch.cat((self.values, array.T), axis=1)]
+            breakpoint()
+        
+        one_hot[torch.arange(len(array))[:, None], onehot_indices] = 1
+        return one_hot
+
 
 class PVNet(nn.Module):
     def __init__(
             self,
             observation_space: gym.Space,
             action_space: gym.Space,
+            info: dict,
     ):
         super().__init__()
         self.observation_space = observation_space
         self.action_space = action_space
-        num_inputs = gym.spaces.flatten_space(observation_space).shape[0]
+        self._info = info
+        self._landmark_indices_in_action = [self._info["action_str_to_idx"][landmark] for landmark in self._info["landmarks"]]
+        # num_inputs = gym.spaces.flatten_space(observation_space).shape[0]
+
+        one_hot_indices = []
+        one_hot_values = []
+        identity_indices = []
+        for player in info["observation_indices"]["player_info"].keys():
+            for card in info["observation_indices"]["player_info"][player]["cards"].keys():
+                card_index = info["observation_indices"]["player_info"][player]["cards"][card]
+                card_values = info["observation_values"]["player_info"][player]["cards"][card]
+                one_hot_indices.append(card_index)
+                one_hot_values.append(card_values)
+
+            identity_indices.append(info["observation_indices"]["player_info"][player]["coins"])
+            identity_indices.append(info["observation_indices"]["player_info"][player]["tech_startup_investment"])
+
+        for alley in info["observation_indices"]["marketplace"].keys():
+            for pos in info["observation_indices"]["marketplace"][alley].keys():
+                card_index = info["observation_indices"]["marketplace"][alley][pos]["card"]
+                card_values = info["observation_values"]["marketplace"][alley][pos]["card"]
+                one_hot_indices.append(card_index)
+                one_hot_values.append(card_values)
+
+                count_index = info["observation_indices"]["marketplace"][alley][pos]["count"]
+                count_values = info["observation_values"]["marketplace"][alley][pos]["count"]
+                one_hot_indices.append(count_index)
+                one_hot_values.append(count_values)
+
+        one_hot_indices.append(info["observation_indices"]["current_player_index"])
+        one_hot_values.append(info["observation_values"]["current_player_index"])
+        one_hot_indices.append(info["observation_indices"]["current_stage_index"])
+        one_hot_values.append(info["observation_values"]["current_stage_index"])
+
+        self._one_hot_indices = list(one_hot_indices)
+        self._identity_indices = list(identity_indices)
+        self._mdoh = MultiDimensionalOneHot(one_hot_values)
+
+        num_inputs = self._mdoh.one_hot_len + len(self._identity_indices)
         num_outputs = action_space.n
-        
+
         # self.fc1 = nn.Linear(num_inputs, 128)
         # self.fc2 = nn.Linear(128, 128)
         # self.fc3 = nn.Linear(128, num_outputs)
@@ -33,9 +109,8 @@ class PVNet(nn.Module):
         
         self.is_trained = False
         self.KLDiv = torch.nn.KLDivLoss(reduction="batchmean")
-        # REMOVE
-        self.ones = np.ones(self.action_space.n)/self.action_space.n
     def forward(self, x):
+        x = torch.cat((self._mdoh.to_onehot(x[:, self._one_hot_indices]), x[:, self._identity_indices]), axis=1)
         # x = torch.relu(self.fc1(x))
         
         # x = torch.relu(self.fc2(x))
@@ -49,13 +124,19 @@ class PVNet(nn.Module):
 
         return logits, value
 
-    def predict(self, observation, flattened=False):
-        # REMOVE
-        return self.ones, 0
-        if not flattened:
-            observation = gym.spaces.flatten(self.observation_space, observation)
+    def predict(self, observation):
+
         input = torch.tensor(observation).unsqueeze(0).to(torch.float32)
         policy_pred, value_pred = self.forward(input)
+
+        current_stage = self._info["stage_order"][observation[self._info["observation_indices"]["current_stage_index"]]]
+        if current_stage == "build":
+            current_player = self._info["player_order"][observation[self._info["observation_indices"]["current_player_index"]]]
+            landmark_indices = [self._info["observation_indices"]["player_info"][current_player]["cards"][landmark] for landmark in self._info["landmarks"]]
+            cost_for_all_unowned_landmarks = np.sum(~observation[landmark_indices].astype(bool)*self._info["landmarks_cost"])
+            player_coins = observation[self._info["observation_indices"]["player_info"][current_player]["coins"]]
+            if player_coins >= cost_for_all_unowned_landmarks:
+                policy_pred[:, self._landmark_indices_in_action] = 1e10
 
         policy_pred = torch.nn.functional.softmax(policy_pred, 1)
 
@@ -107,8 +188,8 @@ class MCTSAgent:
     def reset(self, env_state):
         self.mcts.reset(env_state=env_state)
     
-    def compute_action(self, observation, env_state):
-        probs = self.mcts.compute_probs(observation, env_state)
+    def compute_action(self, observation):
+        probs = self.mcts.compute_probs(observation)
         action = np.argmax(probs)
         return action, probs
     
@@ -132,5 +213,5 @@ if __name__ == "__main__":
 
     # pred = pvnet.predict(buffer[-100][0], flattened=True)
     breakpoint()
-    pred = agent.compute_action(observation=observation, env_state=info["state"])
+    pred = agent.compute_action(observation=observation)
     probs_preds, value_preds = pvnet.forward(torch.tensor(buffer.obss[0:1000]).to(torch.float32))

@@ -1,5 +1,5 @@
 import numpy as np
-from gym.spaces import flatten, flatten_space, Discrete, MultiBinary, Dict
+from gym.spaces import flatten, flatten_space, Discrete, MultiBinary
 import random
 import copy
 
@@ -84,7 +84,7 @@ class Buffer:
         self._episode_number = 0
         self._new_episode = True
 
-    def add(self, obs, action, reward, next_obs, done, probs, info):
+    def add(self, obs, action, reward, next_obs, done, probs, current_player_index, action_mask):
         assert self._size < self._capacity
         index = self._size
         self[index] = (
@@ -93,8 +93,8 @@ class Buffer:
             reward,
             flatten(self._observation_space, next_obs),
             done,
-            info["current_player_index"],
-            info["action_mask"],
+            current_player_index,
+            action_mask,
             0,
             probs
         )
@@ -183,13 +183,6 @@ class Buffer:
         return [self[_indices] for _indices in batches]
 
     def get_episode(self, episode_number: int | None = None):
-        # done_indices, _ = np.where(self.dones == 1)
-        # episode_start_indices = np.insert(done_indices + 1, 0, 0)[:-1]
-        # episode_end_indices = done_indices+1
-
-        # if episode_number is None:
-        #     episode_number = np.random.randint(len(done_indices))
-        
         return self[self._episode_starts[episode_number]: self._episode_ends[episode_number] + 1]
 
     def keep_indices(self, indices):
@@ -202,13 +195,52 @@ class Buffer:
         self._action_masks = self._action_masks[indices]
         self._values = self._values[indices]
         self._probs = self._probs[indices]
-        self._size = len(self._obss)
+        self._size = len(indices)
+
+
+    def keep_episodes(self, episodes):
+        indices_to_keep = []
+        new_episode_starts = {}
+        new_episode_ends = {}
+        new_episode_lengths = {}
+        new_size = 0
+
+        for i, episode in enumerate(episodes):
+            indices_to_keep.extend(range(self._episode_starts[episode], self._episode_ends[episode] + 1))
+            new_episode_starts[i] = new_size
+            new_episode_lengths[i] = self._episode_lengths[episode]
+            new_episode_ends[i] = new_episode_starts[i] + self._episode_lengths[episode] - 1
+            new_size += self._episode_lengths[episode]
+        
+        self.keep_indices(indices_to_keep)
+        self._episode_starts = new_episode_starts
+        self._episode_ends = new_episode_ends
+        self._episode_lengths = new_episode_lengths
+
+
+    def split_buffer_by_episode(self, split, shuffle=True):
+        episodes = list(self._episode_starts.keys())
+        if shuffle:
+            random.shuffle(episodes)
+        
+        split_index = int(len(episodes)*(1-split))
+        buffer_1_indices = episodes[:split_index]
+        buffer_2_indices = episodes[split_index:]
+
+        buffer_2 = copy.deepcopy(self)
+        buffer_2.keep_episodes(buffer_2_indices)
+    
+        buffer_1 = copy.deepcopy(self)
+        buffer_1.keep_episodes(buffer_1_indices)
+
+        return buffer_1, buffer_2
+
 
     def split_buffer(self, split, shuffle=True):
         indices = np.arange(self._size)
 
         if shuffle:
-            np.random.shuffle(indices)
+            np.random.shuffle(indices)#shuffles the buffer (random) ur wlcm
         split_index = int(len(indices)*(1-split))
         buffer_1_indices = indices[:split_index]
         buffer_2_indices = indices[split_index:]

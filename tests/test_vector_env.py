@@ -7,6 +7,7 @@ import pprint
 from random_agent import RandomAgent
 import gym
 import copy
+from unittest.mock import patch
 
 @pytest.fixture
 def n_players():
@@ -22,7 +23,7 @@ def gymenv(n_players):
 
 @pytest.fixture
 def random_agent(gymenv):
-    return RandomAgent(gymenv.observation_space, gymenv.action_space)
+    return RandomAgent(gymenv)
 
 def get_not_current_player(player_order, current_player):
     assert len(player_order) > 1
@@ -570,22 +571,23 @@ def test_shopping_mall_cup_icon(env):
         assert coins_second_player + (payment+1) == env.state_dict()["player_info"][second_player].coins
         assert coins - (payment+1) == env.state_dict()["player_info"][env.current_player]["coins"]
 
+
 def test_amusement_park(env):
-    # so that diceroll will be [1, 1], [1, 3]
-    random.seed(2)
-    env.add_card(env.current_player, "Amusement Park")
-    env.add_card(env.current_player, "Train Station")
+    with patch('random.randint', side_effect=[1,1,1,3]) as mock_random:
+        # so that diceroll will be [1, 1], [1, 3]
+        env.add_card(env.current_player, "Amusement Park")
+        env.add_card(env.current_player, "Train Station")
 
-    for _ in range(5):
-        env.add_card(env.current_player, "Flower Orchard")
+        for _ in range(5):
+            env.add_card(env.current_player, "Flower Orchard")
 
 
-    coins = env.state_dict()["player_info"][env.current_player]["coins"]
-    env.step("2 dice") # throws [1, 1] so can throw again
-    env.step("2 dice") # throws [1, 3]
+        coins = env.state_dict()["player_info"][env.current_player]["coins"]
+        env.step("2 dice") # throws [1, 1] so can throw again
+        env.step("2 dice") # throws [1, 3]
 
-    # 1 for the bakery and 5 for each flower orchard
-    assert coins + 1 + 5 == env.state_dict()["player_info"][env.current_player]["coins"]
+        # 1 for the bakery and 5 for each flower orchard
+        assert coins + 1 + 5 == env.state_dict()["player_info"][env.current_player]["coins"]
 
 def test_airport(env):
     player = env.current_player
@@ -651,11 +653,15 @@ def test_step(env):
 
 def test_marketplace(env):
     n_cards = 0
-    for info in env._card_info.values():
+    for card_name, info in env._card_info.items():
         if info["type"] != "Landmarks":
-            n_cards += info["n_cards"]
+            if card_name in ["Wheat Field", "Bakery"]:
+                n_cards += info["n_cards"] - env.n_players
+            else:
+                n_cards += info["n_cards"]
 
-    for _ in range(2):
+
+    for j in range(2):
         n_gotten_cards = 0
         for i in range(n_cards):
             for alley_name, alley in env._state_indices["marketplace"].items():
@@ -664,9 +670,9 @@ def test_marketplace(env):
                     if n_cards_in_stand > 0:
                         card_to_get = env._card_num_to_name[env.state[stand["card"]]]
                         env.remove_card_from_marketplace(card_to_get)
-                        if n_cards_in_stand > 2:
+                        if n_cards_in_stand > 1:
                             assert env._card_num_to_name[env.state[stand["card"]]] == card_to_get
-                            assert env.state[stand["count"]] == n_cards_in_stand - 1
+                            assert env.state[stand["count"]] == n_cards_in_stand - 1   
                         n_gotten_cards +=1
 
         
@@ -677,23 +683,19 @@ def test_marketplace(env):
         env.reset()
     
 def test_gym_env_obs(gymenv):
-    gymenv.reset()
-
+    obs, _ = gymenv.reset()
     gymenv._env._advance_stage()
+    obs1, _, _, _, _ = gymenv.step(gymenv._action_str_to_idx["Build nothing"])
 
-    obs, _, _, _, _ = gymenv.step(gymenv._action_str_to_idx["Build nothing"])
-    obs_key_list = list(obs.keys())
+    gymenv.set_state(copy.deepcopy(obs))
+    gymenv._env._advance_stage()
+    obs2, _, _, _, _ = gymenv.step(gymenv._action_str_to_idx["Build nothing"])
+    
+    assert np.array_equal(obs1, obs2)
 
-    for i, (obs_key, obs_value) in enumerate(gymenv.observation_space.items()):
-        assert obs_key == obs_key_list[i]
-        if isinstance(obs_value, gym.spaces.Box) or isinstance(obs_value, gym.spaces.Discrete):
-            assert isinstance(obs[obs_key_list[i]], np.int64)
-        else:
-            assert obs_value.n == len(obs[obs_key_list[i]])
-            assert sum(obs[obs_key_list[i]]) == 1
 
 def test_winner_random_policy(gymenv, random_agent):
-    obs, _ = gymenv.reset()
+    obs, info = gymenv.reset()
     for i in range(1000):
         action, prob_dist = random_agent.compute_action(obs)
         obs, reward, done, truncated, info = gymenv.step(action)
@@ -702,42 +704,37 @@ def test_winner_random_policy(gymenv, random_agent):
             break
     assert done
 
-from unittest.mock import MagicMock
 
 def test_roll_dice_always_returns_6(gymenv):
-    random.randint = MagicMock(return_value=2)
     # makes sure that player 0 gets 1 coin in the first turn
+    with patch('random.randint', return_value=2) as mock_random:
+        init_state = gymenv.observation()
+        init_state_deepcopy = copy.deepcopy(init_state)
+        assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
 
-    init_state = gymenv.get_state()
-    init_state_deepcopy = copy.deepcopy(init_state)
-    assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
+        obsa, reward, done, _, info = gymenv.step(0)
+        obsa_deepcopy = copy.deepcopy(obsa)
+        assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
+        assert gymenv.state_dict(obsa)["player_info"]["player 0"]["coins"] == 4
 
-    obsa, reward, done, _, info = gymenv.step(0)
-    obsa_deepcopy = copy.deepcopy(obsa)
-    state_tp1a = info["state"]
-    assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
-    assert gymenv.state_dict(state_tp1a)["player_info"]["player 0"]["coins"] == 4
+        assert not np.array_equal(init_state, obsa)
+        assert not np.array_equal(init_state, gymenv.observation())
+        assert np.array_equal(obsa, gymenv.observation())
+        assert np.array_equal(init_state, init_state_deepcopy)
 
-    assert not np.array_equal(init_state, state_tp1a)
-    assert not np.array_equal(init_state, gymenv.get_state())
-    assert np.array_equal(info["state"], gymenv.get_state())
-    assert np.array_equal(init_state, init_state_deepcopy)
+        # assert init_state != gymenv.state_dict()
+        # assert np.array_equal(info["state"], gymenv.state_dict())
+        # assert np.array_equal(init_state, init_state_deepcopy)
 
-    # assert init_state != gymenv.state_dict()
-    # assert np.array_equal(info["state"], gymenv.state_dict())
-    # assert np.array_equal(init_state, init_state_deepcopy)
+        gymenv.set_state(copy.deepcopy(init_state))
+        assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
 
-    gymenv.set_state(init_state)
-    assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
+        obsb, reward, done, _, info = gymenv.step(0)
+        obsb_deepcopy = copy.deepcopy(obsb)
+        assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
+        assert gymenv.state_dict(obsb)["player_info"]["player 0"]["coins"] == 4
 
-    obsb, reward, done, _, info = gymenv.step(0)
-    obsb_deepcopy = copy.deepcopy(obsb)
-    state_tp1b = info["state"]
-    assert gymenv.state_dict(init_state)["player_info"]["player 0"]["coins"] == 3
-    assert gymenv.state_dict(state_tp1b)["player_info"]["player 0"]["coins"] == 4
+        assert np.array_equal(obsa, obsb)
 
-    assert np.array_equal(state_tp1a, state_tp1b)
-
-    for key in obsa_deepcopy.keys():
-        assert np.array_equal(obsa_deepcopy[key], obsb_deepcopy[key])
+        assert np.array_equal(obsa_deepcopy, obsb_deepcopy)
     

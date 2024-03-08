@@ -32,7 +32,7 @@ def get_trajectories(env, agents):
         while not done:
             steps+=1
 
-            action, probs = agents[env.current_player].compute_action(obs, info["state"])
+            action, probs = agents[env.current_player].compute_action(obs)
 
             print(f"game: {game} | steps: {steps} | player {env.current_player_index} played {env._action_idx_to_str[action]} | coins = {env.player_info[env.current_player].coins}")
             print(f"probs {' '.join(map(str, probs.round(2)))}")

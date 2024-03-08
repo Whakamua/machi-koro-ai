@@ -27,54 +27,53 @@ class ToyEnv:
         self.observation_space = gym.spaces.Dict(
             OrderedDict([("state", gym.spaces.Text(6)), ("action_mask", gym.spaces.MultiDiscrete(2))])
         )
-        self._current_player = False
 
         self.stochastic = stochastic
+        self.reset()
+    
+    @property
+    def action_mask(self):
+        np.ones(2).astype(int)
 
     @property
     def current_player(self):
-        return int(self._current_player)
+        return False
 
     def get_state(self):
-        return {
-            "state": copy.deepcopy(self.state),
-            "_current_player": copy.deepcopy(self._current_player)
-        }
+        return self.state
     
     def set_state(self, state):
-        self.state = copy.deepcopy(state["state"])
-        self._current_player = copy.deepcopy(state["_current_player"])
+        self.state = state
 
     def info(self):
-        return {"state": self.get_state()}
+        return {}
 
     def observation(self):
-        return OrderedDict([("state", self.state), ("action_mask", np.ones(2).astype(int))])
+        return copy.deepcopy(self.state)
 
     def reset(self, state: dict | None = None):
         if state is not None:
             self.set_state(state)
         else:
-            self.state = "0"
+            self.state = np.array([0])
         return self.observation(), self.info()
     
     def step(self, action):
-        if self.stochastic and self.state == "001" and action == 1 and random.random() > 0.3:
-            self.state += str(action*2)
+        if self.stochastic and np.array_equal(self.state, np.array([0,0,1])) and action == 1 and random.random() > 0.3:
+            self.state = np.append(self.state, action*2)
         else:
-            self.state += str(action)
+            self.state = np.append(self.state, action)
 
-        if self.state == "001100":
+        if np.array_equal(self.state, np.array([0,0,1,1,0,0])):
             reward = 2
-        elif self.state == "001010":
+        elif np.array_equal(self.state, np.array([0,0,1,0,1,0])):
             reward = 1
         else:
             reward = 0
-        
+
         if len(self.state) == 6:
             done = True
         else:
-            # self._current_player = not self._current_player
             done = False
 
 
@@ -89,43 +88,46 @@ def stochastic_env():
     return ToyEnv(stochastic=True)
 
 def test_mcts_agent_gets_optimal_policy(env, pvnet):
-    agent = MCTSAgent(env, 100, c_puct=2, pvnet=pvnet, dirichlet_to_root_node=False)
+    agent = MCTSAgent(copy.deepcopy(env), 100, c_puct=2, pvnet=pvnet, dirichlet_to_root_node=False)
 
     obs, info = env.reset()
-    agent.reset(info["state"])
+    agent.reset(obs)
 
     actions = []
     while True:
-        action, probs = agent.compute_action(obs, info["state"])
+        action, probs = agent.compute_action(obs)
         obs, reward, done, _, info = env.step(action)
         actions.append(action)
         if done:
             break
 
-    try:
-        assert actions == [0, 1, 1, 0, 0]
-    except:
-        breakpoint()
+    assert actions == [0, 1, 1, 0, 0]
     
     assert reward == 2
 
 def test_mcts_agent_gets_optimal_policy_in_stochastic_env(stochastic_env, pvnet):
-    agent = MCTSAgent(stochastic_env, 100, c_puct=2, pvnet=pvnet, dirichlet_to_root_node=False)
+    stochastic_env_copy = copy.deepcopy(stochastic_env)
+    pvnet_copy = copy.deepcopy(pvnet)
+    agent = MCTSAgent(copy.deepcopy(stochastic_env_copy), 1000, c_puct=2, pvnet=pvnet_copy, dirichlet_to_root_node=False)
 
-    obs, info = stochastic_env.reset()
-    agent.reset(info["state"])
+    obs, info = stochastic_env_copy.reset()
+    agent.reset(obs)
 
     actions = []
     while True:
         
-        action, probs = agent.compute_action(obs, info["state"])
-        obs, reward, done, _, info = stochastic_env.step(action)
+        action, probs = agent.compute_action(obs)
+        node = agent.mcts.root
+        while True:
+            if node.parent is not None:
+                node = node.parent
+            else:
+                break
+
+        obs, reward, done, _, info = stochastic_env_copy.step(action)
         actions.append(action)
         if done:
             break
-    try:
-        assert actions == [0, 1, 0, 1, 0]
-    except:
-        breakpoint()
-    
+    assert actions == [0, 1, 0, 1, 0]
+
     assert reward == 1

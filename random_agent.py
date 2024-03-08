@@ -6,17 +6,18 @@ import torch.functional as F
 class RandomAgent:
     def __init__(
             self,
-            observation_space: gym.Space,
-            action_space: gym.Space,
+            env,
     ):
-        self.observation_space = observation_space
-        self.action_space = action_space
+        self.observation_space = env.observation_space
+        self.action_space = env.action_space
+        self.env = env
 
     def reset(self, env_state = None):
         return
 
-    def compute_action(self, observation, env_state = None):
-        action_mask = observation["action_mask"]
+    def compute_action(self, observation):
+        self.env.set_state(observation)
+        action_mask = self.env.action_mask
         prob_dist = action_mask/sum(action_mask)
         return np.random.choice(range(self.action_space.n), p=prob_dist), prob_dist
 

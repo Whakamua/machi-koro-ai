@@ -37,13 +37,13 @@ class MCTS():
         observation, info = self.env.reset(env_state)
         root_node = Node(
             observation=observation,
-            action_mask=info["action_mask"],
+            action_mask=self.env.action_mask,
             reward=None,
             done=False,
             player=self.env.current_player,
             parent=None,
             parent_action=None,
-            env_state=info["state"],
+            env_state=observation,
             c_puct=self._c_puct,
         )
         prior, value_estimate = self.pvnet.predict(observation)
@@ -65,9 +65,9 @@ class MCTS():
 
             leaf_node.expand_node(prior=prior, value_estimate=value_estimate)
 
-        leaf_node.backprop()
+        leaf_node.backprop(root_node=self.root)
 
-    def compute_probs(self, observation, env_state):
+    def compute_probs(self, observation):
         reset_tree = True
 
         if observation is not None:
@@ -79,10 +79,9 @@ class MCTS():
                     self.set_root(afterstates[obs_as_str])
                     break
         if reset_tree:
-            self.reset(env_state=env_state)
+            self.reset(observation)
 
-        # REMOVE uncomment this
-        # assert np.array_equal(self.root.env_state, env_state)
+        assert np.array_equal(self.root.env_state, observation)
 
         if self._dirichlet_for_root_node:
             self.add_dirichlet(self.root)
@@ -91,8 +90,9 @@ class MCTS():
             self.search()
         return self.root.Nsa / self.root.Nsa.sum()
 
+
     def obs_as_str(self, obs):
-        return gym.spaces.flatten(self.env.observation_space, obs).tobytes()
+        return obs.tobytes()
         
 
     def find_leaf_node(self, node):
@@ -103,22 +103,23 @@ class MCTS():
         if node.is_leaf_node or node.is_terminal:
             return node
         else:
-            self.env.set_state(node.env_state)
-            obs, reward, done, _, info = self.env.step(node.best_action)
+            self.env.set_state(copy.deepcopy(node.env_state))
+            best_action = node.best_action
+            obs, reward, done, _, info = self.env.step(best_action)
             
             obs_as_str = self.obs_as_str(obs)
-            if obs_as_str not in node.children[node.best_action]:
-                node.children[node.best_action][obs_as_str] = Node(
+            if obs_as_str not in node.children[best_action]:
+                node.children[best_action][obs_as_str] = Node(
                     observation=obs,
-                    action_mask=info["action_mask"],
+                    action_mask=self.env.action_mask,
                     reward=reward,
                     done=done,
                     player=self.env.current_player,
                     parent=node,
-                    parent_action=node.best_action,
-                    env_state=info["state"]
+                    parent_action=best_action,
+                    env_state=obs
                 )
-            return self.find_leaf_node(node.children[node.best_action][obs_as_str])
+            return self.find_leaf_node(node.children[best_action][obs_as_str])
 
 
 class Node:
@@ -271,14 +272,22 @@ class Node:
     def best_action(self):
         return np.argmax(self.PUCTsa)
 
-    def _backprop(self, leaf_node_value: float, leaf_node_player):
-        if self.parent is None:
+    def _backprop(self, leaf_node_value: float, leaf_node_player, root_node):
+        if self.parent is None or self == root_node:
             return self
         parent_value_multiplier = (-1 + 2*(leaf_node_player == self.parent.player))
 
         self.parent._accumulated_value += parent_value_multiplier * leaf_node_value
         self.parent._Qsa_accumulated[self.parent_action] += parent_value_multiplier * leaf_node_value
-        self.parent._backprop(leaf_node_value=leaf_node_value, leaf_node_player=leaf_node_player)
+        self.parent._backprop(
+            leaf_node_value=leaf_node_value,
+            leaf_node_player=leaf_node_player,
+            root_node=root_node
+        )
 
-    def backprop(self):
-        return self._backprop(leaf_node_value=self.reward if self.is_terminal else self.value_estimate, leaf_node_player=self.player)
+    def backprop(self, root_node):
+        return self._backprop(
+            leaf_node_value=self.reward if self.is_terminal else self.value_estimate,
+            leaf_node_player=self.player,
+            root_node=root_node
+        )

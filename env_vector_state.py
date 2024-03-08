@@ -8,10 +8,12 @@ from collections import OrderedDict
 from typing import Optional
 
 class MachiKoro:
-    def __init__(self, n_players: int):
+    def __init__(self, n_players: int, card_info_path: Optional[str] = None):
         self._n_players = n_players
 
-        with open('card_info.yaml') as f:
+        if card_info_path is None:
+            card_info_path = "card_info.yaml"
+        with open(card_info_path) as f:
         # with open('card_info_quick_game.yaml') as f:
             self._card_info = yaml.load(f, Loader=yaml.loader.SafeLoader)
 
@@ -45,6 +47,12 @@ class MachiKoro:
             else:
                 self._init_establishments["7+"].extend([card_name]*info["n_cards"])
 
+        self._spots_per_alley_in_marketplace = {
+            "1-6": 5,
+            "7+": 5,
+            "major": 2,
+        }
+        
         self._stage_order = ["diceroll", "build"]
         self._n_stages = len(self._stage_order)
         self._player_order = [f"player {i}" for i in range(self._n_players)]
@@ -57,44 +65,48 @@ class MachiKoro:
         self.state = []
         self._state_indices = {}
         self._state_indices["player_info"] = {}
-        self.observable_indices = []
+        self._state_values = {}
+        self._state_values["player_info"] = {}
 
         # 1. player_info construct vectors and indices for each player its own state
         ### [n_card_1_p1, n_card_2_p1, ..., n_card_N_pN, n_coins_pN, startup_inv_pN]
         for player in self._player_order:
             self._state_indices["player_info"][player] = {}
+            self._state_values["player_info"][player] = {}
 
             # buildings in city
             self._state_indices["player_info"][player]["cards"] = {}
-            for card in self._card_info.keys():
-                self._state_indices["player_info"][player]["cards"][card] = len(self.state)
-                self.observable_indices.append(len(self.state))
-                self.state.append(card in ["Wheat Field", "Bakery"])
+            self._state_values["player_info"][player]["cards"] = {}
+            for card_name, card_info in self._card_info.items():
+                self._state_indices["player_info"][player]["cards"][card_name] = len(self.state)
+                max_cards_player_can_have = 2 if card_info["type"] == "Landmarks" else card_info["n_cards"] - (self._n_players-1) if card_name in ["Wheat Field", "Bakery"] else card_info["n_cards"]
+                self._state_values["player_info"][player]["cards"][card_name] = range(max_cards_player_can_have + 1) # +1 to make it an inclusive range
+                self.state.append(card_name in ["Wheat Field", "Bakery"])
 
             # coins
             self._state_indices["player_info"][player]["coins"] = len(self.state)
-            self.observable_indices.append(len(self.state))
+            self._state_values["player_info"][player]["coins"] = None
             self.state.append(3)
-            
+
             # tech startup investment
             self._state_indices["player_info"][player]["tech_startup_investment"] = len(self.state)
-            self.observable_indices.append(len(self.state))
+            self._state_values["player_info"][player]["tech_startup_investment"] = None
             self.state.append(0)
 
-        
+
         # 2. state of the deques that lie on the table
         ### [1_6_deque_card_1, 1_6_deque_card_2, ..., _major_deque_card_N]
-            
+
         # the cards will be enumerated, to keep things overseeable there's a name to index mapping.
         self._card_name_to_num = {name: i for i, (name, info) in enumerate(list(self._card_info.items()))}
         self._card_name_to_num["None"] = -1
         self._card_num_to_name = {i: name for name, i in self._card_name_to_num.items()}
-    
+
         self._1_6_deque = []
         self._7_plus_deque = []
         self._major_deque = []
 
-        # create deques unshuffled
+        # create deques
         for card_name, card_info in self._card_info.items():
             if card_info["type"] == "Landmarks":
                 continue
@@ -105,62 +117,54 @@ class MachiKoro:
             else:
                 self._7_plus_deque.extend([self._card_name_to_num[card_name]]*card_info["n_cards"])
 
-        # shuffle deques
-        random.shuffle(self._1_6_deque)
-        random.shuffle(self._7_plus_deque)
-        random.shuffle(self._major_deque)
+        for _ in range(self._n_players):
+            self._1_6_deque.remove(self._card_name_to_num["Wheat Field"])
+            self._1_6_deque.remove(self._card_name_to_num["Bakery"])
 
         self._state_indices["deques"] = {}
 
         self._state_indices["deques"]["1-6"] = {}
         self._state_indices["deques"]["1-6"]["cards"] = list(range(len(self.state), len(self.state)+len(self._1_6_deque)))
-        self.observable_indices.extend(list(range(len(self.state), len(self.state)+len(self._1_6_deque))))
         self.state.extend(self._1_6_deque)
-        self._state_indices["deques"]["1-6"]["top_card_idx"] = len(self.state)
-        self.state.append(len(self._1_6_deque) - 1)
 
         self._state_indices["deques"]["7+"] = {}
         self._state_indices["deques"]["7+"]["cards"] = list(range(len(self.state), len(self.state)+len(self._7_plus_deque)))
         self.state.extend(self._7_plus_deque)
-        self._state_indices["deques"]["7+"]["top_card_idx"] = len(self.state)
-        self.state.append(len(self._7_plus_deque) - 1)
 
         self._state_indices["deques"]["major"] = {}
         self._state_indices["deques"]["major"]["cards"] = list(range(len(self.state), len(self.state)+len(self._major_deque)))
         self.state.extend(self._major_deque)
-        self._state_indices["deques"]["major"]["top_card_idx"] = len(self.state)
-        self.state.append(len(self._major_deque) - 1)
-        
-        
+
         # 3. marketplace
         ### [1_6_pos1_card, 1_6_pos1_count, ..., 7+_pos5_card, 7+_pos5_count, ..., major_pos2_card, major_pos2_count]
         self._state_indices["marketplace"] = {}
-        self._state_indices["marketplace"]["1-6"] = {}
-        for pos in range(5):
-            self._state_indices["marketplace"]["1-6"][f"pos_{pos}"] = {"card": len(self.state), "count": len(self.state)+1}
-            self.observable_indices.extend([len(self.state), len(self.state)+1])
-            # -1 means no card, 0 means zero count.
-            self.state.extend([-1, 0])
-        self._state_indices["marketplace"]["7+"] = {}
-        for pos in range(5):
-            self._state_indices["marketplace"]["7+"][f"pos_{pos}"] = {"card": len(self.state), "count": len(self.state)+1}
-            self.observable_indices.extend([len(self.state), len(self.state)+1])
-            # -1 means no card, 0 means zero count.
-            self.state.extend([-1, 0])
-        self._state_indices["marketplace"]["major"] = {}
-        for pos in range(2):
-            self._state_indices["marketplace"]["major"][f"pos_{pos}"] = {"card": len(self.state), "count": len(self.state)+1}
-            self.observable_indices.extend([len(self.state), len(self.state)+1])
-            # -1 means no card, 0 means zero count.
-            self.state.extend([-1, 0])
+        self._state_values["marketplace"] = {}
 
+        for alley_name, establishments in self._init_establishments.items():
+            self._state_indices["marketplace"][alley_name] = {}
+            self._state_values["marketplace"][alley_name] = {}
+            unique_card_strs_in_alley = np.unique(np.array(self._init_establishments[alley_name]))
+            unique_card_nums_in_alley = [self._card_name_to_num[card_name] for card_name in unique_card_strs_in_alley]
+            max_cards_in_stand = max([self._card_info[card_name]["n_cards"] for card_name in unique_card_strs_in_alley])
+
+            for pos in range(self._spots_per_alley_in_marketplace[alley_name]):
+                # n_different_cards_in_alley = len(unique_cards_in_alley)
+                self._state_indices["marketplace"][alley_name][f"pos_{pos}"] = {
+                    "card": len(self.state),
+                    "count": len(self.state)+1
+                }
+                self.state.extend([-1, 0])
+                self._state_values["marketplace"][alley_name][f"pos_{pos}"] = {
+                    "card": unique_card_nums_in_alley + [-1],
+                    "count": range(0, max_cards_in_stand+1),
+                }
 
         # 4. current_player_index, current_stage_index
         self._state_indices["current_player_index"] = len(self.state)
-        self.observable_indices.append(len(self.state))
+        self._state_values["current_player_index"] = range(0, self.n_players)
         self.state.append(0)
         self._state_indices["current_stage_index"] = len(self.state)
-        self.observable_indices.append(len(self.state))
+        self._state_values["current_stage_index"] = range(0, self._n_stages)
         self.state.append(0)
         self.state = np.array(self.state)
         
@@ -182,22 +186,8 @@ class MachiKoro:
             elif k == "cards":
                 state_dict[k] = [self._card_num_to_name[state[card_idx]] for card_idx in v]
             else:
-                breakpoint()
-
-        
+                raise ValueError(f"key, value: {k}, {v} cannot be parsed")
         return state_dict
-        # state = {
-        #     "player_info": {},
-        #     "marketplace": {},
-        #     "current_player_index": self.state[self._state_indices["player_info"]["current_player_index"]],
-        #     "current_stage_index": self.state[self._state_indices["player_info"]["current_stage_index"]],
-        # }
-
-        # for player, info in self._state_indices["player_info"]:
-
-        # breakpoint()
-        # for l1_name, l1 in self._state_indices.items():
-        #     state = {}
 
 
     @property
@@ -235,8 +225,6 @@ class MachiKoro:
             return self._player_order[:self.current_player_index]
         else:
             return self._player_order[self.current_player_index+1:] + self._player_order[:self.current_player_index]
-
-        # return self._player_order[self.current_player_index:] + self._player_order[:self.current_player_index]
 
     @property
     def next_players_reversed(self):
@@ -332,26 +320,27 @@ class MachiKoro:
     def fill_alleys(self):
         for alley_name, alley in self._state_indices["marketplace"].items():
             # if no cards left, continue to next alley
-            if self.state[self._state_indices["deques"][alley_name]["top_card_idx"]] == -1:
+            if (self.state[self._state_indices["deques"][alley_name]["cards"]] == -1).all():
                 continue
             
             while True:
-                if not self.alley_needs_card(alley_name) or self.state[self._state_indices["deques"][alley_name]["top_card_idx"]] == -1:
+                if not self.alley_needs_card(alley_name) or (self.state[self._state_indices["deques"][alley_name]["cards"]] == -1).all():
                     break
                 self.add_card_to_alley(alley_name)
-                
 
     def add_card_to_alley(self, alley_name):
         card = self.take_from_deque(alley_name)
+        empty_stand = None
         for stand in self._state_indices["marketplace"][alley_name].values():
             if card == self.state[stand["card"]]:
                 self.state[stand["count"]] +=1
                 return
             elif self.state[stand["card"]] == -1:
-                self.state[stand["card"]] = card
-                self.state[stand["count"]] +=1
-                return
-        assert False, f"Could not add card to a stand in alley {alley_name}"
+                empty_stand = stand
+
+        self.state[empty_stand["card"]] = card
+        
+        self.state[empty_stand["count"]] +=1
 
 
     def alley_needs_card(self, alley_name):
@@ -362,12 +351,12 @@ class MachiKoro:
         return False
 
     def take_from_deque(self, deque):
-        assert self.state[self._state_indices["deques"][deque]["top_card_idx"]] >= 0
+        available_card_indices = np.where(self.state[self._state_indices["deques"][deque]["cards"]] != -1)[0]
+        chosen_card_index = np.random.choice(available_card_indices)
+        chosen_card = self.state[self._state_indices["deques"][deque]["cards"][chosen_card_index]]
+        self.state[self._state_indices["deques"][deque]["cards"][chosen_card_index]] = -1
 
-        top_card_idx_in_deque = self.state[self._state_indices["deques"][deque]["top_card_idx"]]
-        top_card_idx_in_state = self._state_indices["deques"][deque]["cards"][top_card_idx_in_deque]
-        self.state[self._state_indices["deques"][deque]["top_card_idx"]] -= 1
-        return self.state[top_card_idx_in_state]
+        return chosen_card
 
     def buy_card(self, player, card):
         assert self.player_coins(player) >= self._card_info[card]["cost"]
@@ -558,8 +547,8 @@ class MachiKoro:
                     self._payment(player, self.current_player, self.player_tech_startup_investment(self.current_player))
 
 class GymMachiKoro(gym.Env):
-    def __init__(self, n_players: int):
-        self._env = MachiKoro(n_players=n_players)
+    def __init__(self, n_players: int, card_info_path: Optional[str] = None):
+        self._env = MachiKoro(n_players=n_players, card_info_path=card_info_path)
 
         actions = ["1 dice", "2 dice"]
         [actions.append(action) for action in self.card_info.keys()]
@@ -570,72 +559,7 @@ class GymMachiKoro(gym.Env):
         self.action_space = gym.spaces.Discrete(len(self._action_idx_to_str))
         self._action_mask = np.zeros(self.action_space.n)
 
-        # self._player_to_idx = {player: idx for idx, player in enumerate(self._env._player_order)}
-
-        self._establishments_to_idx = {
-            "1-6": {"None": 0},
-            "7+": {"None": 0},
-            "major": {"None": 0},
-        }
-
-        for card_name, info in self.card_info.items():
-            if info["type"] == "Landmarks":
-                continue
-            elif info["type"] == "Major Establishment":
-                self._establishments_to_idx["major"][card_name] = len(self._establishments_to_idx["major"])
-            elif info["activation"][0] <= 6:
-                self._establishments_to_idx["1-6"][card_name] = len(self._establishments_to_idx["1-6"])
-            elif info["activation"][0] >= 7:
-                self._establishments_to_idx["7+"][card_name] = len(self._establishments_to_idx["7+"])
-
-        obs_space = OrderedDict()
-        self._obs = OrderedDict()
-        self._obs_indices = {}
-        self._obs_len = 0
-        # assert False, "Hier verder!!! Create obs space here, and overwrite in self.observation so to re-use memory." 
-        # "In self.observation remove things like self._obs[...] = np.zeros and change to self._obs[...] *= 0"
-        def add_player_obs_spaces(player_obs_name):
-            for card in self.card_info.keys():
-                if self.card_info[card]["type"] == "Landmarks":
-                    space_len = 2
-                else:
-                    max_cards = self.card_info[card]["n_cards"]
-                    space_len = 1 + max_cards + (card == "Wheat Field") + (card == "Bakery") # + 1 so that the 1st entry is reserved for 0 cards
-
-                self._obs_indices[f"{player_obs_name}-{card}"] = np.arange(space_len) + self._obs_len
-                self._obs_len += space_len
-
-            self._obs_indices[f"{player_obs_name}-coins"] = np.arange(1) + self._obs_len
-            self._obs_len += 1
-        
-        add_player_obs_spaces("current_player")
-
-
-        for i in range(self._env._n_players-1):
-            add_player_obs_spaces(f"player_current_p_{i+1}")
-
-        for alley_name, alley in self._env._state_indices["marketplace"].items():
-            for pos, stand in alley.items():
-                # encoding which card is in the deck
-                space_len = len(self._establishments_to_idx[alley_name])
-                self._obs_indices[f"marketplace-{alley_name}-{pos}-card"] = np.arange(space_len) + self._obs_len
-                self._obs_len += space_len
-                # encoding how many cards are in the deck
-                space_len = 5+1 if alley_name == "major" else 6+1 # major have max 5 cards and others have max 6 cards. +1 is to account for and empty deque
-                self._obs_indices[f"marketplace-{alley_name}-{pos}-amount"] = np.arange(space_len) + self._obs_len
-                self._obs_len += space_len
-        self._obs_indices["current_player_index"] = np.arange(self._env._n_players) + self._obs_len
-        self._obs_len += self._env._n_players
-        self._obs_indices["current_stage_index"] = np.arange(self._env._n_stages) + self._obs_len
-        self._obs_len += self._env._n_stages
-
-        self._obs_indices["action_mask"] = np.arange(self.action_space.n) + self._obs_len
-        self._obs_len += len(self.action_mask)
-
-        self.observation_space = gym.spaces.MultiBinary(self._obs_len)
-        del self._obs_len
-
-        self._obs = np.zeros(self.observation_space.n)
+        self.observation_space = gym.spaces.MultiBinary(len(self._env.state))
 
     @property
     def card_info(self):
@@ -676,19 +600,8 @@ class GymMachiKoro(gym.Env):
     def diceroll(self, n_dice):
         return self._env._diceroll(n_dice)
 
-    def _get_info(self, action_mask: Optional[np.ndarray] = None):
-        """
-        state and action_mask don't need a deepcopy because they have already been deepcopied
-        state in the return statement of self.get_state()
-        action_mask when passed as an argument, is taken from the observation, which is deepcopied 
-        already.
-        """
-        return {
-            "state": self.get_state(),
-            "current_player_index": copy.deepcopy(self.current_player_index),
-            "is_stochastic": self._env.current_stage == "diceroll",
-            "action_mask": action_mask if action_mask is not None else copy.deepcopy(self.action_mask)
-        }
+    def _get_info(self):
+        return {}
 
     def reset(self, state: dict | None = None):
         if state is not None:
@@ -696,38 +609,20 @@ class GymMachiKoro(gym.Env):
         else:  
             self._env.reset()
         obs = self.observation()
-        # REMOVE
-        self.count = 0
-        self._info = self._get_info(action_mask=obs[self._obs_indices["action_mask"]])
-        #
-        return self.observation(), self._get_info(action_mask=obs[self._obs_indices["action_mask"]])
-
-    def get_state(self):
-        # REMOVE
-        return self._env.state
-        #
-        return copy.deepcopy(self._env.state)
+        return obs, self._get_info()
     
     def state_dict(self, state: Optional[np.array] = None):
         return copy.deepcopy(self._env.state_dict(state))
 
-    def set_state(self, state):
-        # REMOVE
-        return
-        self._env.state = copy.deepcopy(state)
+    def set_state(self, obs):
+        self._env.state = obs
 
     def step(self, action, state: dict | None = None):
-        # REMOVE
-        self.count+=1
-        return self._obs, self.count==100, self.count==100, False, self._info
-        #
         if state:
             self.set_state(state)
         
         winner = self._env.step(self._action_idx_to_str[action])
-        obs = self.observation()
-        info = self._get_info(action_mask=obs[self._obs_indices["action_mask"]])
-        return obs, int(winner), winner, False, info
+        return self.observation(), int(winner), winner, False, self._get_info()
 
     def _diceroll_action_mask(self):
         self._action_mask*=0
@@ -756,27 +651,14 @@ class GymMachiKoro(gym.Env):
             elif self.card_info[action_str]["type"] == "Landmarks" and self._env.player_coins(self.current_player) >= self.card_info[action_str]["cost"] and not self._env.n_of_card_player_owns(self.current_player, action_str):
                 self._action_mask[action] = 1
 
-        # action_actually_allowed = True
-        # for action, allowed in enumerate(self._action_mask):
-        #     if allowed:
-        #         a_str = self._action_idx_to_str[action]
-        #         if a_str not in ["1 dice", "2 dice", "Build nothing"]:
-        #             print(a_str)
-        #             for alley_name, alley in self._env.state_dict()["marketplace"].items():
-        #                 for pos_name, pos in alley.items():
-        #                     if pos["card"] == a_str:
-        #                         action_actually_allowed = True
-        # breakpoint()
-        # if not action_actually_allowed:
-        #     breakpoint()
         return self._action_mask
 
     @property
     def action_mask(self):
         if self._env.current_stage == "build":
-            return self._build_action_mask()
+            return copy.deepcopy(self._build_action_mask())
         elif self._env.current_stage == "diceroll":
-            return self._diceroll_action_mask()
+            return copy.deepcopy(self._diceroll_action_mask())
 
     def sample_action(self):
         action_mask = self.action_mask()
@@ -796,62 +678,12 @@ class GymMachiKoro(gym.Env):
         return self._env.next_players
  
     def observation(self):
-        self._obs *= 0
-        # return copy.deepcopy(self.obs)
-        # assert False, "Hier verder! Construct observation directly from state using self._env.observable_indices"
-        self._add_player_obs(self.current_player, "current_player")
+        return copy.deepcopy(self._env.state)
 
-        for i, player in enumerate(self.next_players()):
-            self._add_player_obs(player, f"player_current_p_{i+1}")
-        
-        for alley_name, alley in self._env._state_indices["marketplace"].items():
-            for pos, stand in alley.items():
-                # encoding which card is in the deck
-                if self._env.state[stand["count"]] != 0:
-                    card = self._env._card_num_to_name[self._env.state[stand["card"]]]
-                    self._obs[self._obs_indices[f"marketplace-{alley_name}-{pos}-card"][self._establishments_to_idx[alley_name][card]]] = 1
-                else:
-                    self._obs[self._obs_indices[f"marketplace-{alley_name}-{pos}-card"][0]] = 1
+    @property
+    def observation_indices(self):
+        return self._env._state_indices
 
-                # encoding how many cards are in the deck
-                self._obs[self._obs_indices[f"marketplace-{alley_name}-{pos}-amount"][self._env.state[stand["count"]]]] = 1
-        self._obs[self._obs_indices["current_player_index"][self._env.current_player_index]] = 1
-        self._obs[self._obs_indices["current_stage_index"][self._env.current_player_index]] = 1
-
-        self._obs[self._obs_indices["action_mask"]] = self.action_mask
-        return copy.deepcopy(self._obs)
-    
-    def flattened_obs(self,):
-        return gym.spaces.flatten(self.observation_space, self.observation())
-    
-    # def _player_info_from_obs(self, player, player_obs_name):
-    #         info = PlayerInfo(self.card_info)
-            
-    #         for card, amount in self._env._player_info[player].cards.items():
-    #             if self.card_info[card]["type"] == "Landmarks":
-    #                 onehot = np.array([not amount, amount]).astype(int)
-    #             else:
-    #                 max_cards = self.card_info[card]["n_cards"]
-    #                 onehot = np.zeros(max_cards + 1 + (card == "Wheat Field") + (card == "Bakery"))
-    #                 onehot[amount] = 1
-    #             self._obs[f"{player_obs_name}-{card}"] = onehot
-    #         self._obs[f"{player_obs_name}-coins"] = self._env._player_info[self.current_player].coins
-
-    def getObservation(self, state):
-        self.set_state(state)
-        return self.observation()
-
-    # def getStringRepresentation(self, state):
-    #     self.set_state(state)
-    #     return copy.deepcopy("".join(map(str,gym.spaces.flatten(self.observation_space, self.obs).astype(int))))
-
-    def getActionSize(self):
-        return self.action_space.n
-
-    def getIsTerminal(self, state):
-        self.set_state(state)
-        return self._env.winner()
-    
-    def getValidMoves(self, state):
-        self.set_state(state)
-        return self.action_mask
+    @property
+    def observation_values(self):
+        return self._env._state_values

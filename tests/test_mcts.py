@@ -11,34 +11,32 @@ def player_per_step():
 class dummyEnv():
     def __init__(self, player_per_step):
         self.player_per_step = player_per_step
-        self.observation_space = gym.spaces.Dict(
-            {
-                "count": gym.spaces.Box(low=0, high=np.inf),
-                "action_mask": gym.spaces.MultiBinary(3)
-            }
-        )
+        self.observation_space = gym.spaces.Discrete(1)
 
+    @property
+    def action_mask(self):
+        return np.ones(3)
     def get_state(self):
-        return {"count": copy.deepcopy(self.count)}
+        return copy.deepcopy(self.count)
     
     def set_state(self, state):
-        self.count = copy.deepcopy(state["count"])
+        self.count = copy.deepcopy(state)
     
     def info(self):
-        return {"state": self.get_state()}
+        return {}
 
     @property
     def current_player(self):
         return self.player_per_step[self.count]
     
     def reset(self, state = None):
-        self.count = 0
-        return {"count": self.count, "action_mask": np.ones(3)}, self.info()
+        self.count = np.array(state if state is not None else 0)
+        return self.count, self.info()
     
     def step(self, action):
         self.count+=1
         end_of_episode = self.count == len(self.player_per_step)-1
-        return {"count": self.count, "action_mask": np.ones(3)}, int(end_of_episode), end_of_episode, False, self.info()
+        return self.count, int(end_of_episode), end_of_episode, False, self.info()
 
 @pytest.fixture
 def prior():
@@ -62,7 +60,7 @@ def env(player_per_step):
 
 @pytest.fixture
 def mcts(env, pvnet):
-    return MCTS(env=env, pvnet=pvnet, num_mcts_sims=10, c_puct=2)
+    return MCTS(env=copy.deepcopy(env), pvnet=pvnet, num_mcts_sims=10, c_puct=2)
 
 def test_node_backprop(prior, player_per_step, mcts, env):
     env.reset()
@@ -72,7 +70,7 @@ def test_node_backprop(prior, player_per_step, mcts, env):
     for i, player in enumerate(player_per_step[1:]): # step 0 is already used for the root node.
         new_node = mcts.find_leaf_node(n0)
         new_node.expand_node(prior=prior, value_estimate=0)
-        new_node.backprop()
+        new_node.backprop(n0)
         nodes.append(new_node)
 
     for i, node in enumerate(reversed(nodes)):
@@ -114,16 +112,26 @@ def test_node_puct(mcts, env):
     obs, info = env.reset()
     node_parent = Node(
         observation=obs,
+        action_mask=env.action_mask,
         reward=None,
         done=False,
         player=env.current_player,
         parent=None,
         parent_action=None,
-        env_state=info["state"],
+        env_state=obs,
         c_puct=1
         )
     node_parent.expand_node(prior=np.array([0.5, 0.5, 0.0]), value_estimate=0)
-    node = Node(observation=obs, reward=0, done=False, player=0, parent=node_parent, parent_action=0, env_state=info["state"])
+    node = Node(
+        observation=obs,
+        action_mask=env.action_mask,
+        reward=0,
+        done=False,
+        player=0,
+        parent=node_parent,
+        parent_action=0,
+        env_state=obs
+    )
     node.expand_node(prior=np.array([0.5, 0.5, 0.0]), value_estimate=0)
 
     node._Qsa_accumulated = np.array([8, 16, 32])
@@ -135,25 +143,27 @@ def test_node_puct(mcts, env):
 def test_mcts_afterstates(mcts):
     mcts.reset()
     mcts.find_leaf_node(mcts.root)
-    mcts.root._env_state["count"] = 1 # setting the env state of the root node to be different so that another after state would be reached we find_leaf_node is called again
+    mcts.root._env_state = np.array(1) # setting the env state of the root node to be different so that another after state would be reached we find_leaf_node is called again
     mcts.find_leaf_node(mcts.root)
     assert len(mcts.root.children[0]) == 2
 
 def test_mcts_compute_probs(mcts, env):
+    mcts.reset()
     obs, info = env.reset()
-    probs = mcts.compute_probs(None, info["state"])
+    probs = mcts.compute_probs(obs)
     assert np.array_equal(mcts.root.Nsa, np.array([10,0,0]))
     assert np.array_equal(probs, np.array([1,0,0]))
 
 def test_mcts_reuse_generated_tree(mcts, env):
+    mcts.reset()
     mcts._dirichlet_for_root_node = False
     obs, info = env.reset()
-    probs = mcts.compute_probs(None, info["state"])
+    probs = mcts.compute_probs(obs)
     assert np.array_equal(mcts.root.Nsa, np.array([10,0,0]))
     assert np.array_equal(probs, np.array([1,0,0]))
 
     obs, _, _, _, info = env.step(np.argmax(probs))
-    probs = mcts.compute_probs(obs, info["state"])
+    probs = mcts.compute_probs(obs)
     assert np.array_equal(mcts.root.Nsa, np.array([19,0,0]))
     assert np.array_equal(probs, np.array([1,0,0]))
 
@@ -163,16 +173,16 @@ def test_mcts_qsasprime(mcts):
     mcts.root._Psa = np.array([1, 0, 0])
     node = mcts.find_leaf_node(mcts.root)
     node.expand_node(np.array([1,0,0]), 1)
-    node.backprop()
+    node.backprop(mcts.root)
 
-    mcts.root._env_state["count"] = 1
+    mcts.root._env_state = np.array(1)
     node = mcts.find_leaf_node(mcts.root)
     node.expand_node(np.array([1,0,0]), 2)
-    node.backprop()
+    node.backprop(mcts.root)
 
     mcts.root._Psa = np.array([0, 0, 1])
     node = mcts.find_leaf_node(mcts.root)
     node.expand_node(np.array([1,0,0]), 2)
-    node.backprop()
+    node.backprop(mcts.root)
 
     assert np.array_equal(mcts.root.Qsa, np.array([1.5,0,2]))

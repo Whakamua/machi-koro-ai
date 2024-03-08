@@ -16,7 +16,7 @@
             "type": "python",
             "request": "launch",
             "module": "pytest",
-            "args" : ["tests/test_vector_env.py::test_gym_env_obs", "-s"],
+            "args" : ["tests/test_buffer.py", "-s"],
             "console": "integratedTerminal",
             "justMyCode": true,
         },

@@ -1,6 +1,5 @@
-from env import GymMachiKoro, MachiKoro
-from env_vector_state import GymMachiKoro as VGymMachiKoro
-from env_vector_state import MachiKoro as VMachiKoro
+
+from env_vector_state import GymMachiKoro
 from multielo import MultiElo
 from gym.wrappers.flatten_observation import FlattenObservation
 from random_agent import RandomAgent
@@ -17,11 +16,7 @@ def deepcopy_obs(obs_space, obs):
 
 def main():
     time_start = time.time()
-    # env = MachiKoro(n_players=2)
-    # env = GymMachiKoro(env)
-    env = VMachiKoro(n_players=2)
-    env = VGymMachiKoro(env)
-    # env = FlattenObservation(env)
+    env = GymMachiKoro(n_players=2)
     elo = MultiElo()
 
     player_elo = [1000 for _ in range(env.n_players)]
@@ -44,24 +39,10 @@ def main():
         steps = 0
         while not done:
             env.set_state(info["state"])
-            action, probs = agents[env.current_player].compute_action(obs, info["state"])    
-            # previous_env = copy.deepcopy(env)
-            # action_actually_allowed = True
-            # for action, allowed in enumerate(obs["action_mask"]):
-            #     if allowed:
-            #         a_str = env._action_idx_to_str[action]
-            #         if a_str not in ["1 dice", "2 dice", "Build nothing"]:
-            #             print(a_str)
-            #             for alley_name, alley in env._env.state_dict()["marketplace"].items():
-            #                 for pos_name, pos in alley.items():
-            #                     if pos["card"] == a_str:
-            #                         action_actually_allowed = True
-            # if not action_actually_allowed:
-            #     breakpoint()
+            action, probs = agents[env.current_player].compute_action(obs)    
 
             obs, reward, done, truncated, info = env.step(action)
             
-            # deepcopy_obs(env.observation_space, obs)
             steps+=1
             cumulative_steps += 1
 
@@ -74,7 +55,6 @@ def main():
                 print(f"game {game} | steps: {steps} | elo: {player_elo} | wins: {wins}")
     print(f"avg_steps: {cumulative_steps/n_games}")
     print(f"time taken: {time.time() - time_start}")
-    # game 9999 | elo: [1035.11131277  995.44385084  985.17885556  984.26598084], wins: [2607, 2594, 2433, 2366]
 
 if __name__ == "__main__":
     profiler = cProfile.Profile()
