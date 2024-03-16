@@ -13,9 +13,9 @@ class dummyEnv():
         self.player_per_step = player_per_step
         self.observation_space = gym.spaces.Discrete(1)
 
-    @property
     def action_mask(self):
         return np.ones(3)
+
     def get_state(self):
         return copy.deepcopy(self.count)
     
@@ -94,9 +94,8 @@ def test_node_backprop(prior, player_per_step, mcts, env):
 
 def test_mcts_search(mcts):
     mcts.reset()
-    for i in range(10):
-        mcts.search()
-        assert mcts.root.N == i+2
+    mcts.search(mcts.root, 10)
+    assert mcts.root.N == 10+1 # +1 because mcts.reset runs mcts.find_leaf_node once.
 
     # make sure the leaf node has been found
     node = mcts.root
@@ -112,7 +111,7 @@ def test_node_puct(mcts, env):
     obs, info = env.reset()
     node_parent = Node(
         observation=obs,
-        action_mask=env.action_mask,
+        action_mask=env.action_mask(),
         reward=None,
         done=False,
         player=env.current_player,
@@ -124,7 +123,7 @@ def test_node_puct(mcts, env):
     node_parent.expand_node(prior=np.array([0.5, 0.5, 0.0]), value_estimate=0)
     node = Node(
         observation=obs,
-        action_mask=env.action_mask,
+        action_mask=env.action_mask(),
         reward=0,
         done=False,
         player=0,

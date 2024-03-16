@@ -738,3 +738,10 @@ def test_roll_dice_always_returns_6(gymenv):
 
         assert np.array_equal(obsa_deepcopy, obsb_deepcopy)
     
+
+def test_state_dict_and_back(gymenv):
+    state_dict = gymenv.state_dict()
+    state_array = gymenv.state_dict_to_array(state_dict)
+    assert np.array_equal(state_array, gymenv._env.state)
+    gymenv.set_state(state_array)
+    assert state_dict == gymenv.state_dict()

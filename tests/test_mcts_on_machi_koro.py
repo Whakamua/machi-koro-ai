@@ -10,7 +10,7 @@ class dummyPvnet():
 
     def predict(self, observation):
         self.env.set_state(observation)
-        action_mask = self.env.action_mask
+        action_mask = self.env.action_mask()
         return action_mask / action_mask.sum(), 0
 
 @pytest.fixture

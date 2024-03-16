@@ -33,8 +33,10 @@ def test_exclude_terminal_states(buffer, observation_space, action_space):
             probs = np.ones(action_space.n)/action_space.n,
             current_player_index=1,
             action_mask=np.array([1, 0, 0, 0, 0]),
+            value_pred=0,
+            value_mcts=0,
             )
-    obss,_,_,_,_,_,_,_,_ = buffer.sample(batch_size=len(init_dones))
+    obss,_,_,_,_,_,_,_,_,_,_ = buffer.sample(batch_size=len(init_dones))
     assert len(obss) == len(init_dones)
 
     batches = buffer.get_random_batches(batch_size=len(init_dones)/2)
@@ -42,7 +44,7 @@ def test_exclude_terminal_states(buffer, observation_space, action_space):
     assert len(batches[0][0]) == len(init_dones)/2
     assert len(batches[1][0]) == len(init_dones)/2
 
-    obss,_,_,_,_,_,_,_,_  = buffer.sample(batch_size=sum(init_dones == 0), exclude_terminal_states=True)
+    obss,_,_,_,_,_,_,_,_,_,_  = buffer.sample(batch_size=sum(init_dones == 0), exclude_terminal_states=True)
     assert len(obss) == sum(init_dones == 0)
 
     batches = buffer.get_random_batches(batch_size=np.ceil(sum(init_dones == 0)/2), exclude_terminal_states=True)
@@ -69,6 +71,8 @@ def test_buffer(buffer, observation_space, action_space):
                 probs = np.ones(action_space.n)/action_space.n,
                 current_player_index=player_first_4_turns if j < 3 else player_last_turn,
                 action_mask=np.array([1, 0, 0, 0, 0]),
+                value_pred=0,
+                value_mcts=0
                 )
             count+=1
         buffer.add(
@@ -80,6 +84,8 @@ def test_buffer(buffer, observation_space, action_space):
             probs = np.ones(action_space.n)/action_space.n,
             current_player_index=player_last_turn,
             action_mask=np.array([1, 0, 0, 0, 0]),
+            value_pred=0,
+            value_mcts=0,
             )
         count+=1
         
@@ -103,6 +109,8 @@ def test_buffer(buffer, observation_space, action_space):
         action_masks,
         values,
         probs,
+        value_preds,
+        values_mcts
     ) = buffer.get_episode(0)
 
     assert np.array_equal(obss[:,0], np.arange(5))
@@ -119,7 +127,9 @@ def test_combine_buffer(buffer, action_space):
             done = (i-1) % 3 == 0,
             probs = np.ones(action_space.n)/action_space.n,
             current_player_index=1,
-            action_mask=np.array([1, 0, 0, 0, 0])
+            action_mask=np.array([1, 0, 0, 0, 0]),
+            value_pred=0,
+            value_mcts=0
         )
     buffer2 = copy.deepcopy(buffer)
     bigbuffer = buffer.get_big_buffer()
@@ -158,7 +168,9 @@ def test_split_buffer(buffer, action_space):
             done = (i-1) % 3 == 0,
             probs = np.ones(action_space.n)/action_space.n,
             current_player_index=1,
-            action_mask=np.array([1, 0, 0, 0, 0])
+            action_mask=np.array([1, 0, 0, 0, 0]),
+            value_pred=0,
+            value_mcts=0
         )
     
     buffer1, buffer2 = buffer.split_buffer_by_episode(0.2)

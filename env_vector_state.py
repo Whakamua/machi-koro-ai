@@ -189,6 +189,24 @@ class MachiKoro:
                 raise ValueError(f"key, value: {k}, {v} cannot be parsed")
         return state_dict
 
+    def state_dict_to_array(self, state_dict, state_indices = None, state_array = None):
+        if state_array is None:
+            state_array = np.zeros_like(self.state)
+        if state_indices is None:
+            state_indices = self._state_indices
+
+        for k, v in state_indices.items():
+            if k == "card":
+                state_array[v] = self._card_name_to_num[state_dict[k]]
+            elif isinstance(v, int):
+                state_array[v] = state_dict[k]
+            elif isinstance(v, dict):
+                state_array = self.state_dict_to_array(state_dict[k], state_indices[k], state_array)
+            elif k == "cards":
+                state_array[v] = [self._card_name_to_num[card_name] for card_name in state_dict[k]]
+            else:
+                raise ValueError(f"key, value: {k}, {v} cannot be parsed")
+        return state_array
 
     @property
     def current_player_index(self):
@@ -239,7 +257,7 @@ class MachiKoro:
                     if self._card_info[card]["type"] == card_type:
                         for _ in range(self.n_of_card_player_owns(player, card)):
                             self._activate_card(player, card)
-                        
+
 
     def _diceroll_test(self):
         return random.randint(1,6)
@@ -614,8 +632,12 @@ class GymMachiKoro(gym.Env):
     def state_dict(self, state: Optional[np.array] = None):
         return copy.deepcopy(self._env.state_dict(state))
 
+    def state_dict_to_array(self, state_dict):
+        return self._env.state_dict_to_array(state_dict)
+
     def set_state(self, obs):
         self._env.state = obs
+
 
     def step(self, action, state: dict | None = None):
         if state:
@@ -653,12 +675,21 @@ class GymMachiKoro(gym.Env):
 
         return self._action_mask
 
-    @property
-    def action_mask(self):
+    def action_mask(self, observation: Optional[np.ndarray] = None):
+        if observation is not None:
+            current_obs = copy.deepcopy(self.observation())
+            self.set_state(observation)
+            action_mask = self.action_mask()
+            self.set_state(current_obs)
+            return action_mask
+
         if self._env.current_stage == "build":
             return copy.deepcopy(self._build_action_mask())
         elif self._env.current_stage == "diceroll":
             return copy.deepcopy(self._diceroll_action_mask())
+
+    def action_mask_as_dict(self, action_mask):
+        return {name: action_mask[idx] for idx, name in self._action_idx_to_str.items()}
 
     def sample_action(self):
         action_mask = self.action_mask()

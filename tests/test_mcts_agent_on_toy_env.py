@@ -31,7 +31,6 @@ class ToyEnv:
         self.stochastic = stochastic
         self.reset()
     
-    @property
     def action_mask(self):
         np.ones(2).astype(int)
 

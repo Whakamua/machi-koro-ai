@@ -65,6 +65,14 @@ class Buffer:
         return self._values[:self.size]
     
     @property
+    def value_preds(self):
+        return self._value_preds[:self.size]
+    
+    @property
+    def values_mcts(self):
+        return self._values_mcts[:self.size]
+    
+    @property
     def probs(self):
         return self._probs[:self.size]
 
@@ -77,6 +85,8 @@ class Buffer:
         self._player_ids = np.zeros((capacity, 1))
         self._action_masks = np.zeros((capacity, self._action_space.n))
         self._values = np.zeros((capacity, 1))
+        self._value_preds = np.zeros((capacity, 1))
+        self._values_mcts = np.zeros((capacity, 1))
         self._probs = np.zeros((capacity, self._action_space.n))
         self._episode_starts = {}
         self._episode_ends = {}
@@ -84,7 +94,7 @@ class Buffer:
         self._episode_number = 0
         self._new_episode = True
 
-    def add(self, obs, action, reward, next_obs, done, probs, current_player_index, action_mask):
+    def add(self, obs, action, reward, next_obs, done, probs, current_player_index, action_mask, value_pred, value_mcts):
         assert self._size < self._capacity
         index = self._size
         self[index] = (
@@ -96,7 +106,9 @@ class Buffer:
             current_player_index,
             action_mask,
             0,
-            probs
+            value_pred,
+            value_mcts,
+            probs,
         )
         if self._new_episode:
             self._episode_starts[self._episode_number] = self.size
@@ -150,6 +162,8 @@ class Buffer:
             self._player_ids[indices],
             self._action_masks[indices],
             self._values[indices],
+            self._value_preds[indices],
+            self._values_mcts[indices],
             self._probs[indices],
         )
 
@@ -162,7 +176,9 @@ class Buffer:
         self._player_ids[indices] = items[5]
         self._action_masks[indices] = items[6]
         self._values[indices] = items[7]
-        self._probs[indices] = items[8]
+        self._value_preds[indices] = items[8]
+        self._values_mcts[indices] = items[9]
+        self._probs[indices] = items[10]
 
     def sample(self, batch_size, exclude_terminal_states=False):
         if exclude_terminal_states:
@@ -182,8 +198,11 @@ class Buffer:
         batches = np.array_split(indices, n_batches)
         return [self[_indices] for _indices in batches]
 
-    def get_episode(self, episode_number: int | None = None):
-        return self[self._episode_starts[episode_number]: self._episode_ends[episode_number] + 1]
+    def get_episode_indices(self, episode_number: int):
+        return list(range(self._episode_starts[episode_number], self._episode_ends[episode_number] + 1))
+
+    def get_episode(self, episode_number: int):
+        return self[self.get_episode_indices(episode_number)]
 
     def keep_indices(self, indices):
         self._obss = self._obss[indices]
@@ -194,6 +213,8 @@ class Buffer:
         self._player_ids = self._player_ids[indices]
         self._action_masks = self._action_masks[indices]
         self._values = self._values[indices]
+        self._value_preds = self._value_preds[indices]
+        self._values_mcts = self._values_mcts[indices]
         self._probs = self._probs[indices]
         self._size = len(indices)
 

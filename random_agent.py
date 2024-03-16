@@ -17,7 +17,7 @@ class RandomAgent:
 
     def compute_action(self, observation):
         self.env.set_state(observation)
-        action_mask = self.env.action_mask
+        action_mask = self.env.action_mask()
         prob_dist = action_mask/sum(action_mask)
         return np.random.choice(range(self.action_space.n), p=prob_dist), prob_dist
 
