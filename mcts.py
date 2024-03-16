@@ -25,7 +25,10 @@ class MCTS():
         return self._root
     
     def update_pvnet(self, state_dict):
-        self.pvnet.load_state_dict(state_dict)
+        self.pvnet.use_uniform_pvnet = state_dict["uniform_pvnet"]
+        self.pvnet.use_custom_policy_edit = state_dict["custom_policy_edit"]
+        self.pvnet.use_custom_value = state_dict["custom_value"]
+        self.pvnet.load_state_dict(state_dict["pvnet_state_dict"])
 
     def add_dirichlet(self, node):
         epsilon = 0.25
@@ -37,7 +40,7 @@ class MCTS():
         observation, info = self.env.reset(env_state)
         root_node = Node(
             observation=observation,
-            action_mask=self.env.action_mask,
+            action_mask=self.env.action_mask(),
             reward=None,
             done=False,
             player=self.env.current_player,
@@ -55,17 +58,18 @@ class MCTS():
     def set_root(self, root: Node):
         self._root = root
 
-    def search(self):
-        leaf_node = self.find_leaf_node(self.root)
-        
-        if leaf_node.is_terminal:
-            assert leaf_node.player == leaf_node.parent.player
-        else:
-            prior, value_estimate = self.pvnet.predict(leaf_node.observation)
+    def search(self, node, n=1):
+        for _ in range(n):
+            leaf_node = self.find_leaf_node(node)
+            
+            if leaf_node.is_terminal:
+                assert leaf_node.player == leaf_node.parent.player
+            else:
+                prior, value_estimate = self.pvnet.predict(leaf_node.observation)
 
-            leaf_node.expand_node(prior=prior, value_estimate=value_estimate)
+                leaf_node.expand_node(prior=prior, value_estimate=value_estimate)
 
-        leaf_node.backprop(root_node=self.root)
+            leaf_node.backprop(root_node=node)
 
     def compute_probs(self, observation):
         reset_tree = True
@@ -86,9 +90,11 @@ class MCTS():
         if self._dirichlet_for_root_node:
             self.add_dirichlet(self.root)
 
-        for _ in range(self.num_mcts_sims):
-            self.search()
-        return self.root.Nsa / self.root.Nsa.sum()
+        self.search(self.root, self.num_mcts_sims)
+        if self.num_mcts_sims > 0:
+            return self.root.Nsa / self.root.Nsa.sum()
+        else:
+            return self.root.PUCTsa
 
 
     def obs_as_str(self, obs):
@@ -111,7 +117,7 @@ class MCTS():
             if obs_as_str not in node.children[best_action]:
                 node.children[best_action][obs_as_str] = Node(
                     observation=obs,
-                    action_mask=self.env.action_mask,
+                    action_mask=self.env.action_mask(),
                     reward=reward,
                     done=done,
                     player=self.env.current_player,
@@ -239,6 +245,9 @@ class Node:
     @property
     def children(self):
         return self._children
+    
+    def get_child(self, action_idx, afterstate_idx):
+        return list(self.children[action_idx].values())[afterstate_idx]
 
     @property
     def PUCTsa(self):

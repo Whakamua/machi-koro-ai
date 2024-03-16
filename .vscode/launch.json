@@ -16,7 +16,7 @@
             "type": "python",
             "request": "launch",
             "module": "pytest",
-            "args" : ["tests/test_buffer.py", "-s"],
+            "args" : ["tests/test_vector_env.py::test_state_dict_and_back", "-s"],
             "console": "integratedTerminal",
             "justMyCode": true,
         },
@@ -25,6 +25,13 @@
             "type": "python",
             "request": "launch",
             "program": "/Users/jordydikkers/personal/projects/machi-koro-ai/compete_agents.py",
+            "console": "integratedTerminal",
+        },
+        {
+            "name": "Machi Koro Self Play",
+            "type": "python",
+            "request": "launch",
+            "program": "/Users/jordydikkers/personal/projects/machi-koro-ai/self_play_machi_koro.py",
             "console": "integratedTerminal",
         },
     ]
