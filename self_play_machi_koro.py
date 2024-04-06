@@ -1,4 +1,4 @@
-from env_vector_state import GymMachiKoro
+from env_machi_koro_2 import GymMachiKoro2
 from mcts_agent import MCTSAgent
 from buffer import Buffer, BigBuffer
 import numpy as np
@@ -9,7 +9,7 @@ import pickle
 import time
 import random, os
 from ray.util.actor_pool import ActorPool
-# import cProfile
+import cProfile
 from mcts_agent import PVNet
 from typing import Optional
 from collections import OrderedDict
@@ -49,7 +49,7 @@ class MachiKoroActor:
             pvnet_kwargs,
             buffer_capacity,
             n_players,
-            worker_id,
+            worker_id
         ):
         self._worker_id = worker_id
         self._buffer_capacity = buffer_capacity
@@ -118,13 +118,13 @@ class MachiKoroActor:
 
 def main():
 
-    MCTS_SIMULATIONS = 25
+    MCTS_SIMULATIONS = 100
     PUCT = 2
     PVNET_TRAIN_EPOCHS = 10
     BATCH_SIZE = 64
-    GAMES_PER_ITERATION = 150
-    TEST_GAMES_PER_ITERATION = 15
-    CARD_INFO_PATH = "card_info.yaml"
+    GAMES_PER_ITERATION = 1500
+    TEST_GAMES_PER_ITERATION = 0
+    CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
     N_PLAYERS = 2
     TRAIN_VAL_SPLIT = 0.2
     LR = 0.001
@@ -139,7 +139,7 @@ def main():
     if use_ray:
         ray.init()
 
-    env_cls = GymMachiKoro
+    env_cls = GymMachiKoro2
     env_kwargs = {"n_players": N_PLAYERS, "card_info_path": CARD_INFO_PATH}
     temp_env = env_cls(**env_kwargs)
 
@@ -211,16 +211,16 @@ def main():
         pvnet_state_dict = pvnet_for_training.state_dict()
 
         training_pvnets = {
-            f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": False, "custom_policy_edit": False, "custom_value": False},
-            f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": False, "custom_policy_edit": False, "custom_value": False},
+            f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
+            f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
         }
         testing_pvnets = {
             f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
-            f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": False, "custom_value": False},
+            f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
         }
 
         game_ids = np.arange(GAMES_PER_ITERATION + TEST_GAMES_PER_ITERATION)
-        test_game_ids = game_ids[-TEST_GAMES_PER_ITERATION:]
+        test_game_ids = game_ids[-TEST_GAMES_PER_ITERATION:] if TEST_GAMES_PER_ITERATION != 0 else []
         if use_ray:
             actor_generator = actor_pool.map_unordered(
                 lambda a, v: a.play_game.remote(v, testing_pvnets if v in test_game_ids else training_pvnets, GAME_START_STATE),
@@ -235,10 +235,11 @@ def main():
         games_played = 0
         time_now = time.time()
         for buffer, time_taken, game_id in actor_generator:
-            # breakpoint()
             games_played += 1
             # print(f"game {game_id} took {time_taken} sec to complete", end='\r')
-            print(f"game {games_played}/{len(game_ids)}", end="\r" if games_played < len(game_ids) else "\n")
+            time_taken = time.time() - time_now
+            estimated_time_left = time_taken / games_played * (GAMES_PER_ITERATION + TEST_GAMES_PER_ITERATION - games_played)
+            print(f"game {games_played}/{len(game_ids)}, estimated seconds left: {round(estimated_time_left)}", end="\r" if games_played < len(game_ids) else "\n")
             steps_collected += buffer.size
             if game_id in test_game_ids:
                 winner = int(buffer.player_ids[-1].item())
@@ -255,15 +256,14 @@ def main():
             observation_space=observation_space,
             action_space=action_space
         )
-        test_buffer = BigBuffer(
-            observation_space=observation_space,
-            action_space=action_space
-        )
+        # test_buffer = BigBuffer(
+        #     observation_space=observation_space,
+        #     action_space=action_space
+        # )
 
         buffer.combine_buffers(buffers)
-        test_buffer.combine_buffers(test_buffers)
+        # test_buffer.combine_buffers(test_buffers)
         print(f"time: {time.time() - t1}")
-
         # obss, actions, rewards, next_obss, dones, player_ids, action_masks, values, value_preds, values_mcts, probs = test_buffer.get_episode(0)
         # test_buffer.compute_values()
         # [print(item) for item in zip(player_ids, value_preds, values_mcts)]
@@ -272,18 +272,19 @@ def main():
 
         with open(f"{checkpoint_dir}/buffer_{i}.pkl", "wb") as file:
             pickle.dump(buffer, file)
-        with open(f"{checkpoint_dir}/test_buffer_{i}.pkl", "wb") as file:
-            pickle.dump(test_buffer, file)
-        pvnet_for_training.train(
-            buffer=buffer,
-            batch_size=BATCH_SIZE,
-            epochs=PVNET_TRAIN_EPOCHS,
-            train_val_split=TRAIN_VAL_SPLIT,
-            lr=LR,
-            weight_decay=WEIGHT_DECAY,
-        )
+        # with open(f"{checkpoint_dir}/test_buffer_{i}.pkl", "wb") as file:
+        #     pickle.dump(test_buffer, file)
+        # return
+        # pvnet_for_training.train(
+        #     buffer=buffer,
+        #     batch_size=BATCH_SIZE,
+        #     epochs=PVNET_TRAIN_EPOCHS,
+        #     train_val_split=TRAIN_VAL_SPLIT,
+        #     lr=LR,
+        #     weight_decay=WEIGHT_DECAY,
+        # )
 
-        torch.save(pvnet_for_training, f"{checkpoint_dir}/model_{i}.pt")
+        # torch.save(pvnet_for_training, f"{checkpoint_dir}/model_{i}.pt")
 
 
 if __name__ == "__main__":

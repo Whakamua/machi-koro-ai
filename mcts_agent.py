@@ -43,15 +43,18 @@ class PVNet(nn.Module):
             self,
             env_cls,
             env_kwargs,
+            uniform_pvnet: bool = False,
+            custom_policy_edit: bool = False,
+            custom_value: bool = False,
     ):
         super().__init__()
         env = env_cls(**env_kwargs)
         self.env = env
-        self.use_uniform_pvnet = False
-        self.use_custom_policy_edit = False
-        self.use_custom_value = False
-        self._landmark_indices_in_action = [env._action_str_to_idx[landmark] for landmark in env._env._landmark_cards_ascending_in_price]
-        self.landmarks_cost = [env.card_info[landmark]["cost"] for landmark in env._env._landmark_cards_ascending_in_price]
+        self.use_uniform_pvnet = uniform_pvnet
+        self.use_custom_policy_edit = custom_policy_edit
+        self.use_custom_value = custom_value
+        self._landmark_indices_in_action = [env._action_str_to_idx[landmark] for landmark in env._env._landmarks]
+        self.landmarks_cost = [env.card_info[landmark]["cost"] for landmark in env._env._landmarks]
         # num_inputs = gym.spaces.flatten_space(observation_space).shape[0]
         
         self.one_dice_rolls = np.array([1,2,3,4,5,6])
@@ -71,7 +74,6 @@ class PVNet(nn.Module):
                 one_hot_values.append(card_values)
 
             identity_indices.append(env.observation_indices["player_info"][player]["coins"])
-            identity_indices.append(env.observation_indices["player_info"][player]["tech_startup_investment"])
 
         for alley in env.observation_indices["marketplace"].keys():
             for pos in env.observation_indices["marketplace"][alley].keys():
@@ -89,6 +91,10 @@ class PVNet(nn.Module):
         one_hot_values.append(env.observation_values["current_player_index"])
         one_hot_indices.append(env.observation_indices["current_stage_index"])
         one_hot_values.append(env.observation_values["current_stage_index"])
+        one_hot_indices.append(env.observation_indices["another_turn"])
+        one_hot_values.append(env.observation_values["another_turn"])
+        one_hot_indices.append(env.observation_indices["build_rounds_left"])
+        one_hot_values.append(env.observation_values["build_rounds_left"])
 
         self._one_hot_indices = list(one_hot_indices)
         self._identity_indices = list(identity_indices)
@@ -165,7 +171,7 @@ class PVNet(nn.Module):
         
         # if all landmarks that are left to be bought, can be bought, at least 1 must be bought.
         if current_stage == "build":
-            landmark_indices = [self.env.observation_indices["player_info"][current_player]["cards"][landmark] for landmark in self.env._env._landmark_cards_ascending_in_price]
+            landmark_indices = [self.env.observation_indices["player_info"][current_player]["cards"][landmark] for landmark in self.env._env._landmarks]
             cost_for_all_unowned_landmarks = np.sum(~observation[landmark_indices].astype(bool)*self.landmarks_cost)
             player_coins = observation[self.env.observation_indices["player_info"][current_player]["coins"]]
             if player_coins >= cost_for_all_unowned_landmarks:
@@ -222,8 +228,8 @@ class PVNet(nn.Module):
         else:
             other_player_expected_coins_per_turn = other_p_coins_when_other_p_throw_2d
 
-        landmark_indices_current_player = [self.env.observation_indices["player_info"][current_player]["cards"][landmark] for landmark in self.env._env._landmark_cards_ascending_in_price]
-        landmark_indices_other_player = [self.env.observation_indices["player_info"][other_player]["cards"][landmark] for landmark in self.env._env._landmark_cards_ascending_in_price]
+        landmark_indices_current_player = [self.env.observation_indices["player_info"][current_player]["cards"][landmark] for landmark in self.env._env._landmarks]
+        landmark_indices_other_player = [self.env.observation_indices["player_info"][other_player]["cards"][landmark] for landmark in self.env._env._landmarks]
         current_player_cost_for_all_unowned_landmarks = np.sum(~observation[landmark_indices_current_player].astype(bool)*self.landmarks_cost)
         other_player_cost_for_all_unowned_landmarks = np.sum(~observation[landmark_indices_other_player].astype(bool)*self.landmarks_cost)
         
@@ -332,11 +338,13 @@ class MCTSAgent:
             num_mcts_sims,
             c_puct,
             pvnet,
-            dirichlet_to_root_node = True
+            dirichlet_to_root_node = True,
+            thinking_time: int = None,
+            print_info: bool = False,
     ):
         self.observation_space = env.observation_space
         self.action_space = env.action_space
-        self.mcts = MCTS(env, pvnet, num_mcts_sims, c_puct, dirichlet_to_root_node)
+        self.mcts = MCTS(env, pvnet, num_mcts_sims, c_puct, dirichlet_to_root_node, thinking_time, print_info)
         warnings.warn("Not using any temperature in probs, might need that for first n actions")
 
     def update_pvnet(self, state_dict):

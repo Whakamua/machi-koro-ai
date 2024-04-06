@@ -1,6 +1,6 @@
 import pytest
 from mcts_agent import MCTSAgent
-from env_vector_state import GymMachiKoro
+from env import GymMachiKoro
 import numpy as np
 import copy
 

@@ -1,5 +1,5 @@
 import pytest
-from env_vector_state import MachiKoro, GymMachiKoro
+from env import MachiKoro, GymMachiKoro
 from collections import deque
 import random
 import numpy as np

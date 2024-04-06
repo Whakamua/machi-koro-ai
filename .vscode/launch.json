@@ -16,7 +16,7 @@
             "type": "python",
             "request": "launch",
             "module": "pytest",
-            "args" : ["tests/test_vector_env.py::test_state_dict_and_back", "-s"],
+            "args" : ["tests/test_machikoro2_env.py::test_primary_industries", "-s"],
             "console": "integratedTerminal",
             "justMyCode": true,
         },

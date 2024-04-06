@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import copy
 import gym
+import time
 
 
 class MCTS():
@@ -11,13 +12,15 @@ class MCTS():
     This class handles the MCTS tree.
     """
 
-    def __init__(self, env, pvnet, num_mcts_sims, c_puct, dirichlet_for_root_node = True):
+    def __init__(self, env, pvnet, num_mcts_sims, c_puct, dirichlet_for_root_node = True, thinking_time: int = None, print_info: bool = False):
         self.env = env
         self.pvnet = pvnet
         self.num_mcts_sims = num_mcts_sims
         self._c_puct = c_puct
         self._root = None
         self._dirichlet_for_root_node = dirichlet_for_root_node
+        self._thinking_time = thinking_time
+        self._print_info = print_info
         print("I lovelovelove you")
     
     @property
@@ -58,18 +61,41 @@ class MCTS():
     def set_root(self, root: Node):
         self._root = root
 
-    def search(self, node, n=1):
-        for _ in range(n):
-            leaf_node = self.find_leaf_node(node)
+    def search(self, node, n: int = None, thinking_time: int = None):
+        self.n_sims_executed = 0
+        if thinking_time is not None:
+            start_time = time.time()
+            while True:
+                time_spent = time.time() - start_time
+                if self._print_info:
+                    print(f"Thinking... {np.round(time_spent/thinking_time * 100, 1)}% done.", end="\r")
+                if time_spent > thinking_time:
+                    break
+                self._search(node)
+                self.n_sims_executed += 1
+        elif n is not None:
+            for i in range(n):
+                if self._print_info:
+                    print(f"Thinking... {np.round(i+1/n * 100, 1)}% done.", end="\r")
+                self._search(node)
+            self.n_sims_executed = n
+        else:
+            raise ValueError("Specify number of MCTS simulations or thinking time")
+
             
-            if leaf_node.is_terminal:
-                assert leaf_node.player == leaf_node.parent.player
-            else:
-                prior, value_estimate = self.pvnet.predict(leaf_node.observation)
 
-                leaf_node.expand_node(prior=prior, value_estimate=value_estimate)
+    def _search(self, node):
+        leaf_node = self.find_leaf_node(node)
+            
+        if leaf_node.is_terminal:
+            assert leaf_node.player == leaf_node.parent.player
+        else:
+            prior, value_estimate = self.pvnet.predict(leaf_node.observation)
 
-            leaf_node.backprop(root_node=node)
+            leaf_node.expand_node(prior=prior, value_estimate=value_estimate)
+
+        leaf_node.backprop(root_node=node)
+
 
     def compute_probs(self, observation):
         reset_tree = True
@@ -90,8 +116,8 @@ class MCTS():
         if self._dirichlet_for_root_node:
             self.add_dirichlet(self.root)
 
-        self.search(self.root, self.num_mcts_sims)
-        if self.num_mcts_sims > 0:
+        self.search(self.root, self.num_mcts_sims, self._thinking_time)
+        if self.n_sims_executed > 0:
             return self.root.Nsa / self.root.Nsa.sum()
         else:
             return self.root.PUCTsa
