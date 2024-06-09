@@ -94,6 +94,8 @@ class Buffer:
         self._episode_number = 0
         self._new_episode = True
 
+        self.values_computed = False
+
     def add(self, obs, action, reward, next_obs, done, probs, current_player_index, action_mask, value_pred, value_mcts):
         assert self._size < self._capacity
         index = self._size
@@ -110,6 +112,7 @@ class Buffer:
             value_mcts,
             probs,
         )
+        self.values_computed = False
         if self._new_episode:
             self._episode_starts[self._episode_number] = self.size
             self._new_episode = False
@@ -151,6 +154,7 @@ class Buffer:
                         self._values[i] = 0
                     else:
                         self._values[i] = 1 if self._player_ids[i] == winner else -1
+        self.values_computed = True
 
     def __getitem__(self, indices):
         return (
@@ -187,15 +191,18 @@ class Buffer:
             batch_indices = np.random.randint(low=0, high=self._size, size=batch_size, dtype=int)
         return self[batch_indices]
 
-    def get_random_batches(self, batch_size, exclude_terminal_states=False):
+    def get_random_batch_indices(self, batch_size, exclude_terminal_states=False):
         assert batch_size <= self._size
-        n_batches = int(self._size / batch_size)
         if exclude_terminal_states:
             indices = np.arange(self.size)[~self.dones[:,0].astype(bool)]
         else:
             indices = np.arange(self.size)
         np.random.shuffle(indices)
-        batches = np.array_split(indices, n_batches)
+        n_batches = int(self._size / batch_size)
+        return np.array_split(indices, n_batches)
+
+    def get_random_batches(self, batch_size, exclude_terminal_states=False):
+        batches = self.get_random_batch_indices(batch_size, exclude_terminal_states=exclude_terminal_states)
         return [self[_indices] for _indices in batches]
 
     def get_episode_indices(self, episode_number: int):

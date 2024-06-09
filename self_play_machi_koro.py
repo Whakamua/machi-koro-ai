@@ -16,6 +16,7 @@ from collections import OrderedDict
 from multielo import MultiElo
 import datetime
 import copy
+import mlflow
 
 def seed_all(seed):
     random.seed(seed)
@@ -122,8 +123,8 @@ def main():
     PUCT = 2
     PVNET_TRAIN_EPOCHS = 10
     BATCH_SIZE = 64
-    GAMES_PER_ITERATION = 1500
-    TEST_GAMES_PER_ITERATION = 0
+    GAMES_PER_ITERATION = 10
+    TEST_GAMES_PER_ITERATION = 5
     CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
     N_PLAYERS = 2
     TRAIN_VAL_SPLIT = 0.2
@@ -138,6 +139,9 @@ def main():
     # breakpoint()
     if use_ray:
         ray.init()
+
+    mlflow.set_tracking_uri(uri="http://127.0.0.1:8080")
+    mlflow.set_experiment(f"Self Play {int(time.time())}")
 
     env_cls = GymMachiKoro2
     env_kwargs = {"n_players": N_PLAYERS, "card_info_path": CARD_INFO_PATH}
@@ -211,11 +215,11 @@ def main():
         pvnet_state_dict = pvnet_for_training.state_dict()
 
         training_pvnets = {
-            f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
-            f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
+            f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": False, "custom_policy_edit": False, "custom_value": False},
+            f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": False, "custom_policy_edit": False, "custom_value": False},
         }
         testing_pvnets = {
-            f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
+            f"player 0": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": False, "custom_policy_edit": False, "custom_value": False},
             f"player 1": {"pvnet_state_dict": pvnet_state_dict, "uniform_pvnet": True, "custom_policy_edit": True, "custom_value": True},
         }
 
@@ -256,13 +260,13 @@ def main():
             observation_space=observation_space,
             action_space=action_space
         )
-        # test_buffer = BigBuffer(
-        #     observation_space=observation_space,
-        #     action_space=action_space
-        # )
+        test_buffer = BigBuffer(
+            observation_space=observation_space,
+            action_space=action_space
+        )
 
         buffer.combine_buffers(buffers)
-        # test_buffer.combine_buffers(test_buffers)
+        test_buffer.combine_buffers(test_buffers)
         print(f"time: {time.time() - t1}")
         # obss, actions, rewards, next_obss, dones, player_ids, action_masks, values, value_preds, values_mcts, probs = test_buffer.get_episode(0)
         # test_buffer.compute_values()
@@ -272,19 +276,18 @@ def main():
 
         with open(f"{checkpoint_dir}/buffer_{i}.pkl", "wb") as file:
             pickle.dump(buffer, file)
-        # with open(f"{checkpoint_dir}/test_buffer_{i}.pkl", "wb") as file:
-        #     pickle.dump(test_buffer, file)
-        # return
-        # pvnet_for_training.train(
-        #     buffer=buffer,
-        #     batch_size=BATCH_SIZE,
-        #     epochs=PVNET_TRAIN_EPOCHS,
-        #     train_val_split=TRAIN_VAL_SPLIT,
-        #     lr=LR,
-        #     weight_decay=WEIGHT_DECAY,
-        # )
-
-        # torch.save(pvnet_for_training, f"{checkpoint_dir}/model_{i}.pt")
+        with open(f"{checkpoint_dir}/test_buffer_{i}.pkl", "wb") as file:
+            pickle.dump(test_buffer, file)
+        with mlflow.start_run() as run:
+            pvnet_for_training.train(
+                buffer=buffer,
+                batch_size=BATCH_SIZE,
+                epochs=PVNET_TRAIN_EPOCHS,
+                train_val_split=TRAIN_VAL_SPLIT,
+                lr=LR,
+                weight_decay=WEIGHT_DECAY,
+            )
+        pvnet_for_training.save(f"{checkpoint_dir}/model_{i}")
 
 
 if __name__ == "__main__":

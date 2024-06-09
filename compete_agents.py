@@ -9,6 +9,7 @@ import cProfile
 import copy
 import gym
 import time
+import torch
 
 def deepcopy_obs(obs_space, obs):
     obs_flt = gym.spaces.flatten(obs_space, obs)
@@ -18,18 +19,25 @@ def deepcopy_obs(obs_space, obs):
 def main():
     N_PLAYERS = 2
     CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
-    MCTS_SIMULATIONS = None
-    THINKING_TIME = 10
+    MCTS_SIMULATIONS = 100
+    THINKING_TIME = None
     PUCT = 2
 
 
     time_start = time.time()
     env_cls = GymMachiKoro2
     env_kwargs = {"n_players": N_PLAYERS, "card_info_path": CARD_INFO_PATH}
-    env = env_cls(**env_kwargs, print_info=True)
+    env = env_cls(**env_kwargs, print_info=False)
 
     pvnet_cls = PVNet
-    pvnet_kwargs = {
+    pvnetp0_kwargs = {
+        "env_cls": env_cls,
+        "env_kwargs": env_kwargs,
+        "uniform_pvnet": True,
+        "custom_policy_edit": True,
+        "custom_value": True,
+    }
+    pvnetp1_kwargs = {
         "env_cls": env_cls,
         "env_kwargs": env_kwargs,
         "uniform_pvnet": True,
@@ -37,22 +45,30 @@ def main():
         "custom_value": True,
     }
 
+
+    pvnet_p0 = pvnet_cls(**pvnetp0_kwargs)
+    pvnet_p1 = pvnet_cls(**pvnetp1_kwargs)
+    pvnet_p1.load_state_dict(torch.load("pvnet.ckpt"))
+
     elo = MultiElo()
 
     player_elo = [1000 for _ in range(env.n_players)]
     wins = [0 for _ in range(env.n_players)]
 
     agents = {
-        "player 0": ManualAgent(env),
-        "player 1": MCTSAgent(env_cls(**env_kwargs), num_mcts_sims=MCTS_SIMULATIONS, c_puct=PUCT, pvnet=pvnet_cls(**pvnet_kwargs), thinking_time=THINKING_TIME, print_info=True),
+        # "player 0": ManualAgent(env),
+        "player 0": MCTSAgent(env_cls(**env_kwargs, print_info=False), num_mcts_sims=MCTS_SIMULATIONS, c_puct=PUCT, pvnet=pvnet_p0, thinking_time=THINKING_TIME, print_info=False),
+        "player 1": MCTSAgent(env_cls(**env_kwargs, print_info=False), num_mcts_sims=MCTS_SIMULATIONS, c_puct=PUCT, pvnet=pvnet_p1, thinking_time=THINKING_TIME, print_info=False),
     }
     
     cumulative_steps = 0
-    n_games = 1
+    n_games = 100
+    player_order = env.player_order
     for game in range(n_games):
         action_history = []
         done = False
-        obs, info = env.reset()
+        player_order = [player_order[-1]] + player_order[:-1]
+        obs, info = env.reset(player_order=player_order)
         [agent.reset(obs) for agent in agents.values()]
 
         count = 0
@@ -62,6 +78,7 @@ def main():
             action_mask = env.action_mask()
             action, probs = agents[current_player].compute_action(obs)
 
+            # breakpoint()
             next_obs, reward, done, truncated, info = env.step(action)
             action_history.append(action)
             
@@ -69,20 +86,20 @@ def main():
             cumulative_steps += 1
 
             if done:
-                print(f"Done, {current_player} wins!")
-                ranking = [1 if player == current_player else 2 for player in env.player_order]
-
+                print(f"Done, {current_player} wins!, player_order: {env.player_order}")
+                ranking = [1 if current_player == "player 0" else 2, 1 if current_player == "player 1" else 2]
                 for i, rank in enumerate(ranking):
                     if rank == 1:
                         wins[i] += 1
                 player_elo = elo.get_new_ratings(player_elo, result_order=ranking)
                 print(f"game {game} | steps: {steps} | elo: {player_elo} | wins: {wins}")
+            obs = next_obs
     print(f"avg_steps: {cumulative_steps/n_games}")
     print(f"time taken: {time.time() - time_start}")
 
 if __name__ == "__main__":
-    profiler = cProfile.Profile()
-    profiler.enable()
+    # profiler = cProfile.Profile()
+    # profiler.enable()
     main()
-    profiler.disable()
-    profiler.dump_stats("env.prof")
+    # profiler.disable()
+    # profiler.dump_stats("env.prof")

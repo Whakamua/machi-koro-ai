@@ -5,12 +5,16 @@ import warnings
 
 from mcts import MCTS
 import itertools
+from buffer import Buffer
 import copy
+import mlflow
+import os
 
 class MultiDimensionalOneHot:
-    def __init__(self, values):
+    def __init__(self, values, device: str = None):
+        self.device = device
         # np array where each row is padded with nans
-        self.values = torch.tensor(list(itertools.zip_longest(*values, fillvalue=np.nan))).T
+        self.values = torch.tensor(list(itertools.zip_longest(*values, fillvalue=np.nan)), device=self.device, requires_grad=False).T
 
         # the one_hot_start_indices represent the indices in a flattened array. Each index is the
         # start index of a onehot dimension.
@@ -21,9 +25,9 @@ class MultiDimensionalOneHot:
         self.one_hot_len = sum(map(len, values))
         # self.start_indices = (np.cumsum(n_elements) - n_elements)
 
-    def to_onehot(self, array):
+    def to_onehot(self, array, batch_size=512):
         # one hot initialized by zeros
-        one_hot = torch.zeros((len(array), self.one_hot_len))
+        one_hot = torch.zeros((len(array), self.one_hot_len), device=self.device, requires_grad=False)
 
         # The following line figures out what indices in the flattened onehot array need to be 
         # marked as `1`. It does that by taking the array and figure out the indices at which it
@@ -37,8 +41,107 @@ class MultiDimensionalOneHot:
         one_hot[torch.arange(len(array))[:, None], onehot_indices] = 1
         return one_hot
 
+class EarlyStopping:
+    def __init__(self, patience: int = 10, min_delta: float = 0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = None
+        self.best_epoch = None
+        self.best_params = None
+        self.wait = 0
 
-class PVNet(nn.Module):
+    def update(self, loss, epoch, params=None):
+        if self.best_loss is None:
+            self.best_loss = loss
+            self.best_epoch = epoch
+            self.best_params = params
+        elif self.best_loss - loss > self.min_delta:
+            self.best_loss = loss
+            self.best_epoch = epoch
+            self.best_params = params
+            self.wait = 0
+        else:
+            self.wait += 1
+        if self.wait >= self.patience:
+            return True
+        return False
+
+    def reset(self):
+        self.best_loss = None
+        self.best_epoch = None
+        self.best_params = None
+        self.wait = 0
+
+def add_layer(module, name, f_in, f_out, nonlinearity, device, layer_norm=True):
+    layer = nn.Linear(f_in, f_out, device=device)
+    if nonlinearity in ["softmax", "sigmoid", "tanh"]:
+        nn.init.xavier_normal_(layer.weight)
+    else:
+        nn.init.kaiming_normal_(layer.weight, nonlinearity=nonlinearity)
+    module.add_module(name, layer)
+    if layer_norm:
+        linear_norm = nn.LayerNorm(f_out, device=device)
+        module.add_module(f"{name}_norm", linear_norm)
+    return module
+
+class PolicyNet(nn.Module):
+    def __init__(
+            self,
+            f_in,
+            f_out,
+            device: str = None,
+    ):
+        super().__init__()
+        self.device = device
+        self.logits = nn.Sequential()
+        self.logits = add_layer(self.logits, "logits1", f_in, 128, "relu", self.device)
+        self.logits.add_module("logits_relu1", nn.ReLU())
+        self.logits = add_layer(self.logits, "logits2", 128, 128, "relu", self.device)
+        self.logits.add_module("logits_relu2", nn.ReLU())
+        self.logits = add_layer(self.logits, "logits3", 128, 128, "relu", self.device)
+        self.logits.add_module("logits_relu3", nn.ReLU())
+        self.logits = add_layer(self.logits, "logits4", 128, 128, "relu", self.device)
+        self.logits.add_module("logits_relu4", nn.ReLU())
+        self.logits = add_layer(self.logits, "logits5", 128, f_out, "softmax", self.device)
+        self.KLDiv = torch.nn.KLDivLoss(reduction="batchmean")
+
+    def forward(self, x):
+        return self.logits(x)
+        
+    
+    def loss(self, policy_preds, policy_targets):
+        policy_loss = self.KLDiv(torch.nn.functional.log_softmax(policy_preds), policy_targets)
+        return policy_loss
+    
+class ValueNet(nn.Module):
+    def __init__(
+            self,
+            f_in,
+            f_out,
+            device: str = None,
+    ):
+        super().__init__()
+        self.device = device
+        self.value = nn.Sequential()
+        self.value = add_layer(self.value, "value1", f_in, 10, "relu", self.device)
+        self.value.add_module("value_relu1", nn.ReLU())
+        self.value = add_layer(self.value, "value2", 10, 128, "relu", self.device)
+        self.value.add_module("value_relu2", nn.ReLU())
+        self.value = add_layer(self.value, "value3", 128, 128, "relu", self.device)
+        self.value.add_module("value_relu3", nn.ReLU())
+        self.value = add_layer(self.value, "value4", 128, 10, "relu", self.device)
+        self.value.add_module("value_relu4", nn.ReLU())
+        self.value = add_layer(self.value, "value5", 10, f_out, "tanh", self.device, layer_norm=False)
+        self.value.add_module("value_tanh5", nn.Tanh())
+
+    def forward(self, x):
+        return self.value(x)
+    
+    def loss(self, value_preds, value_targets):
+        value_loss = torch.nn.functional.mse_loss(value_preds, value_targets)
+        return value_loss
+
+class PVNet:
     def __init__(
             self,
             env_cls,
@@ -46,13 +149,14 @@ class PVNet(nn.Module):
             uniform_pvnet: bool = False,
             custom_policy_edit: bool = False,
             custom_value: bool = False,
+            device: str = None,
     ):
-        super().__init__()
         env = env_cls(**env_kwargs)
         self.env = env
         self.use_uniform_pvnet = uniform_pvnet
         self.use_custom_policy_edit = custom_policy_edit
         self.use_custom_value = custom_value
+        self.device = device
         self._landmark_indices_in_action = [env._action_str_to_idx[landmark] for landmark in env._env._landmarks]
         self.landmarks_cost = [env.card_info[landmark]["cost"] for landmark in env._env._landmarks]
         # num_inputs = gym.spaces.flatten_space(observation_space).shape[0]
@@ -66,14 +170,19 @@ class PVNet(nn.Module):
         one_hot_indices = []
         one_hot_values = []
         identity_indices = []
+        one_hot_index_names = []
+        identity_index_names = []
         for player in env.observation_indices["player_info"].keys():
             for card in env.observation_indices["player_info"][player]["cards"].keys():
                 card_index = env.observation_indices["player_info"][player]["cards"][card]
-                card_values = env.observation_values["player_info"][player]["cards"][card]
-                one_hot_indices.append(card_index)
-                one_hot_values.append(card_values)
+                # card_values = env.observation_values["player_info"][player]["cards"][card]
+                # one_hot_indices.append(card_index)
+                # one_hot_values.append(card_values)
+                identity_indices.append(card_index)
+                identity_index_names.append(f"player_info/{player}/{card}")
 
             identity_indices.append(env.observation_indices["player_info"][player]["coins"])
+            identity_index_names.append(f"player_info/{player}/coins")
 
         for alley in env.observation_indices["marketplace"].keys():
             for pos in env.observation_indices["marketplace"][alley].keys():
@@ -81,59 +190,253 @@ class PVNet(nn.Module):
                 card_values = env.observation_values["marketplace"][alley][pos]["card"]
                 one_hot_indices.append(card_index)
                 one_hot_values.append(card_values)
+                one_hot_index_names.extend([f"marketplace/{alley}/{pos}/card/{env._env._card_num_to_name[num]}" for num in card_values])
 
-                count_index = env.observation_indices["marketplace"][alley][pos]["count"]
-                count_values = env.observation_values["marketplace"][alley][pos]["count"]
-                one_hot_indices.append(count_index)
-                one_hot_values.append(count_values)
+                if alley != "landmarks":
+                    count_index = env.observation_indices["marketplace"][alley][pos]["count"]
+                    # count_values = env.observation_values["marketplace"][alley][pos]["count"]
+                    # one_hot_indices.append(count_index)
+                    # one_hot_values.append(count_values)
+                    identity_indices.append(count_index)
+                    identity_index_names.append(f"marketplace/{alley}/{pos}/count")
 
         one_hot_indices.append(env.observation_indices["current_player_index"])
         one_hot_values.append(env.observation_values["current_player_index"])
+        one_hot_index_names.extend([f"current_player_index/{i}" for i in env.observation_values["current_player_index"]])
+
         one_hot_indices.append(env.observation_indices["current_stage_index"])
         one_hot_values.append(env.observation_values["current_stage_index"])
+        one_hot_index_names.extend([f"current_stage_index/{i}" for i in env.observation_values["current_stage_index"]])
+
         one_hot_indices.append(env.observation_indices["another_turn"])
         one_hot_values.append(env.observation_values["another_turn"])
+        one_hot_index_names.extend([f"another_turn/{i}" for i in env.observation_values["another_turn"]])
+
         one_hot_indices.append(env.observation_indices["build_rounds_left"])
         one_hot_values.append(env.observation_values["build_rounds_left"])
+        one_hot_index_names.extend([f"build_rounds_left/{i}" for i in env.observation_values["build_rounds_left"]])
 
-        self._one_hot_indices = list(one_hot_indices)
-        self._identity_indices = list(identity_indices)
+        self._one_hot_indices = one_hot_indices
+        self._identity_indices = identity_indices
+        self._input_names = one_hot_index_names + identity_index_names
+
+        self._one_hot_indices_tensor = torch.tensor(np.array(one_hot_indices), device=self.device, requires_grad=False)
+        self._identity_indices_tensor = torch.tensor(np.array(identity_indices), device=self.device, requires_grad=False)
         self._mdoh = MultiDimensionalOneHot(one_hot_values)
 
         num_inputs = self._mdoh.one_hot_len + len(self._identity_indices)
         num_outputs = self.env.action_space.n
 
-        # self.fc1 = nn.Linear(num_inputs, 128)
-        # self.fc2 = nn.Linear(128, 128)
-        # self.fc3 = nn.Linear(128, num_outputs)
-
-        # self.fc4 = nn.Linear(128, 64)
-        # self.fc5 = nn.Linear(64, 1)
-        self.fctrunk = nn.Linear(num_inputs, 10)
-        self.fclogits = nn.Linear(10, num_outputs)
-        self.fcvalue = nn.Linear(10, 1)
-
-
-        self.is_trained = False
+        self.policy_net = PolicyNet(num_inputs, num_outputs, device=self.device)
+        self.value_net = ValueNet(num_inputs, 1, device=self.device)
         
         self.is_trained = False
         self.KLDiv = torch.nn.KLDivLoss(reduction="batchmean")
 
+    def add_layer(self, module, name, f_in, f_out, nonlinearity, device, layer_norm=True):
+        layer = nn.Linear(f_in, f_out, device=device)
+        if nonlinearity in ["softmax", "sigmoid", "tanh"]:
+            nn.init.xavier_normal_(layer.weight)
+        else:
+            nn.init.kaiming_normal_(layer.weight, nonlinearity=nonlinearity)
+        module.add_module(name, layer)
+        if layer_norm:
+            linear_norm = nn.LayerNorm(f_out, device=device)
+            module.add_module(f"{name}_norm", linear_norm)
+        return module
 
-    def forward(self, x):
-        x = torch.cat((self._mdoh.to_onehot(x[:, self._one_hot_indices]), x[:, self._identity_indices]), axis=1)
-        # x = torch.relu(self.fc1(x))
-        
-        # x = torch.relu(self.fc2(x))
-        # policy = self.fc3(x)
-        # x = torch.relu(self.fc4(x))
-        # value = torch.tanh(self.fc5(x))
-        # return policy, value
-        trunk = torch.relu(self.fctrunk(x))
-        logits = self.fclogits(trunk)
-        value = torch.tanh(self.fcvalue(trunk))
+    def obss_to_onehot(self, obss):
+        return torch.cat((self._mdoh.to_onehot(obss[:, self._one_hot_indices]), obss[:, self._identity_indices]), axis=1)
 
-        return logits, value
+    def pred_policy(self, observation):
+        logits = self.logits(observation)
+        return logits
+    
+    def pred_value(self, observation):
+        value = self.value(observation)
+        return value
+
+    def predict(self, observation):
+        with torch.no_grad():
+            if self.use_uniform_pvnet:
+                policy_pred, value_pred = torch.ones((1, self.env.action_space.n)), torch.zeros((1, 1))
+                policy_pred = policy_pred + 0.01*torch.randn((1, self.env.action_space.n))
+            else:
+                input = self.obss_to_onehot(torch.tensor(observation.astype(np.float32)).unsqueeze(0)).to(self.device)
+                policy_pred, value_pred = self.policy_net(input), self.value_net(input)
+                
+            # overwrite policy or value if specified.
+            if self.use_custom_policy_edit:
+                policy_pred = self.custom_policy_edit(observation, policy_pred)
+            if self.use_custom_value:
+                value_pred = self.custom_value(observation)
+
+            policy_pred = torch.nn.functional.softmax(policy_pred, 1)
+            if policy_pred.device.type != "cpu":
+                policy_pred = policy_pred.cpu()
+            if value_pred.device.type != "cpu":
+                value_pred = value_pred.cpu()
+            return policy_pred.squeeze().detach().numpy(), value_pred.squeeze(0).detach().numpy()
+
+    def scale_x(self, x):
+        x[:, self._identity_indices_tensor] = (x[:, self._identity_indices_tensor] - self.x_mean) / self.x_std
+        return x
+
+    def train(
+            self,
+            batch_size,
+            epochs,
+            train_val_split,
+            lr,
+            weight_decay,
+            buffer: Buffer | None = None,
+            train_buffer: Buffer | None = None,
+            val_buffer: Buffer | None = None,
+        ):
+        if buffer is not None:
+            buffer.compute_values()
+            train_buffer, val_buffer = buffer.split_buffer_by_episode(train_val_split)
+        else:
+            assert train_buffer is not None and val_buffer is not None
+        self.x_mean = torch.tensor(train_buffer.obss[:, self._identity_indices].mean(axis=0).astype(np.float32), device=self.device, requires_grad=False)
+        self.x_std = torch.tensor(train_buffer.obss[:, self._identity_indices].std(axis=0).astype(np.float32), device=self.device, requires_grad=False)
+
+
+        avg_train_loss = None
+        avg_val_loss = None
+        epoch = 0
+
+        obss_train, _, _, _, _, _, _, values_train, _, _, probs_train = train_buffer[:]
+        obss_train = torch.tensor(obss_train.astype(np.float32))
+        obss_train = self.obss_to_onehot(obss_train)
+        values_train = torch.tensor(values_train.astype(np.float32))
+        probs_train = torch.tensor(probs_train.astype(np.float32))
+        obss_train, values_train, probs_train = obss_train.to(self.device), values_train.to(self.device), probs_train.to(self.device)
+
+        obss_val, _, _, _, _, _, _, values_val, _, _, probs_val = val_buffer[:]
+        obss_val = torch.tensor(obss_val.astype(np.float32))
+        obss_val = self.obss_to_onehot(obss_val)
+        values_val = torch.tensor(values_val.astype(np.float32))
+        probs_val = torch.tensor(probs_val.astype(np.float32))
+        obss_val, values_val, probs_val = obss_val.to(self.device), values_val.to(self.device), probs_val.to(self.device)
+
+
+        policy_optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr, weight_decay=weight_decay)
+        value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=lr, weight_decay=weight_decay)
+
+        policy_early_stopping = EarlyStopping(patience=5)
+        value_early_stopping = EarlyStopping(patience=5)
+
+        policy_done = False
+        value_done = False
+
+        for epoch in range(epochs):
+
+            with torch.no_grad():
+                if not policy_done:
+                    prob_preds = self.policy_net(torch.tensor(obss_val))
+                    avg_val_policy_loss = self.policy_net.loss(prob_preds, torch.tensor(probs_val))
+
+                    if policy_early_stopping.update(avg_val_policy_loss, epoch, self.policy_net.state_dict()):
+                        print("policy net is done!")
+                        policy_done = True
+
+                if not value_done:
+                    value_preds = self.value_net(torch.tensor(obss_val))
+                    avg_val_value_loss = self.value_net.loss(value_preds, torch.tensor(values_val))
+
+                    if value_early_stopping.update(avg_val_value_loss, epoch, self.value_net.state_dict()):
+                        print("value net is done!")
+                        value_done = True
+            
+            if policy_done and value_done:
+                break
+
+            indices_for_all_batches = train_buffer.get_random_batch_indices(batch_size)
+
+            tot_train_policy_loss = 0
+            tot_train_value_loss = 0
+            train_steps_since_last_val_step = 0
+            n_batches = len(indices_for_all_batches)
+            print(n_batches)
+            for i, batch_indices in enumerate(indices_for_all_batches):
+                train_steps_since_last_val_step += 1
+
+                if not policy_done:
+                    prob_preds = self.policy_net(torch.tensor(obss_train[batch_indices]))
+                    policy_loss = self.policy_net.loss(prob_preds, torch.tensor(probs_train[batch_indices]))
+
+                    policy_optimizer.zero_grad()
+                    policy_loss.backward()
+                    policy_optimizer.step()
+
+                    tot_train_policy_loss += policy_loss.detach()
+                    avg_train_policy_loss = tot_train_policy_loss/train_steps_since_last_val_step
+
+                if not value_done:
+                    value_preds = self.value_net(torch.tensor(obss_train[batch_indices]))
+                    value_loss = self.value_net.loss(value_preds, torch.tensor(values_train[batch_indices]))
+
+                    value_optimizer.zero_grad()
+                    value_loss.backward()
+                    value_optimizer.step()
+
+                    tot_train_value_loss += value_loss.detach()
+                    avg_train_value_loss = tot_train_value_loss/train_steps_since_last_val_step
+
+                avg_train_loss = avg_train_policy_loss + avg_train_value_loss
+
+                if i % 100 == 0:
+                    with torch.no_grad():
+                        if not policy_done:
+                            prob_preds = self.policy_net(torch.tensor(obss_val))
+                            avg_val_policy_loss = self.policy_net.loss(prob_preds, torch.tensor(probs_val))
+
+                        if not value_done:
+                            value_preds = self.value_net(torch.tensor(obss_val))
+                            avg_val_value_loss = self.value_net.loss(value_preds, torch.tensor(values_val))
+
+                        avg_val_loss = avg_val_policy_loss + avg_val_value_loss
+
+                        print(f"epoch: {epoch} {round(i/n_batches * 100)}% | train_loss | {avg_train_loss} | val_loss: {avg_val_loss} | train_policy_loss: {avg_train_policy_loss} | train_value_loss: {avg_train_value_loss} | val_policy_loss: {avg_val_policy_loss} | val_value_loss: {avg_val_value_loss} | policy_done: {policy_done} | value_done: {value_done}", end="\r")
+                        mlflow.log_metric("epoch", epoch, step=i)
+                        mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=i)
+                        mlflow.log_metric("train_value_loss", avg_train_value_loss, step=i)
+                        mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=i)
+                        mlflow.log_metric("val_value_loss", avg_val_value_loss, step=i)
+                        mlflow.log_metric("train_loss", avg_train_loss, step=i)
+                        mlflow.log_metric("val_loss", avg_val_loss, step=i)
+                        tot_train_policy_loss = 0
+                        tot_train_value_loss = 0
+                        train_steps_since_last_val_step = 0
+            
+            if policy_done and value_done:
+                break
+
+        self.policy_net.load_state_dict(policy_early_stopping.best_params)
+        self.value_net.load_state_dict(value_early_stopping.best_params)
+
+        print(f"epoch: {epoch} | train_loss | {avg_train_loss} | val_loss: {avg_val_loss} | train_policy_loss: {avg_train_policy_loss} | train_value_loss: {avg_train_value_loss} | val_policy_loss: {avg_val_policy_loss} | val_value_loss: {avg_val_value_loss} | policy_done: {policy_done} | value_done: {value_done}")
+        return train_buffer, val_buffer, avg_train_loss, avg_val_loss
+
+    def save(self, folder):
+        os.mkdir(folder)
+        torch.save(self.policy_net.state_dict(), folder+"/policy_net.ckpt")
+        torch.save(self.value_net.state_dict(), folder+"/value_net.ckpt")
+
+    def load(self, folder):
+        self.policy_net.load_state_dict(torch.load(folder+"/policy_net.ckpt"))
+        self.value_net.load_state_dict(torch.load(folder+"/value_net.ckpt"))
+
+    def load_state_dict(self, state_dict):
+        self.policy_net.load_state_dict(state_dict["policy_weights"])
+        self.value_net.load_state_dict(state_dict["value_weights"])
+
+    def state_dict(self):
+        return {
+            "policy_weights": self.policy_net.state_dict(),
+            "value_weights": self.value_net.state_dict(),
+        }
 
     def expected_coins_diceroll(self, current_player, n_dice, observation):
         self.env.set_state(copy.deepcopy(observation))
@@ -257,79 +560,6 @@ class PVNet(nn.Module):
 
         return torch.tensor(value)
 
-
-    def predict(self, observation):
-        if self.use_uniform_pvnet:
-            policy_pred, value_pred = torch.ones((1, self.env.action_space.n)), torch.zeros((1, 1))
-            policy_pred = policy_pred + 0.01*torch.randn((1, self.env.action_space.n))
-        else:
-            input = torch.tensor(observation).unsqueeze(0).to(torch.float32)
-            policy_pred, value_pred = self.forward(input)
-        # overwrite policy or value if specified.
-        if self.use_custom_policy_edit:
-            policy_pred = self.custom_policy_edit(observation, policy_pred)
-        if self.use_custom_value:
-            value_pred = self.custom_value(observation)
-
-        policy_pred = torch.nn.functional.softmax(policy_pred, 1)
-        return policy_pred.squeeze().detach().numpy(), value_pred.detach().numpy().item()
-    
-    def _loss(self, policy_preds, value_preds, policy_targets, value_targets):
-        policy_loss = self.KLDiv(torch.nn.functional.log_softmax(policy_preds), torch.tensor(policy_targets).to(torch.float32))
-        value_loss = torch.nn.functional.mse_loss(value_preds, torch.tensor(value_targets).to(torch.float32))
-        return policy_loss + value_loss
-
-    def train(
-            self,
-            buffer,
-            batch_size,
-            epochs,
-            train_val_split,
-            lr,
-            weight_decay,
-        ):
-        buffer.compute_values()
-        train_buffer, val_buffer = buffer.split_buffer_by_episode(train_val_split)
-
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
-
-        for epoch in range(epochs):
-            train_batches = train_buffer.get_random_batches(batch_size = batch_size)
-
-            tot_train_loss = 0
-            train_steps_since_last_val_step = 0
-            for i, batch in enumerate(train_batches):
-                train_steps_since_last_val_step += 1
-                obss, actions, rewards, next_obss, dones, player_ids, action_masks, values, value_preds, probs = batch
-                
-                # policy_preds, value_preds = self.forward(torch.tensor(obss).to(torch.float32))
-                prob_preds, value_preds = self.forward(torch.tensor(obss).to(torch.float32))
-                loss = self._loss(
-                    policy_preds=prob_preds,
-                    value_preds=value_preds,
-                    policy_targets=probs,
-                    value_targets=values
-                )
-                tot_train_loss += loss
-                if i % 100 == 0:
-                    obss, _, _, _, _, _, _, values, probs = val_buffer[:]
-                    # policy_preds, value_preds = self.forward(torch.tensor(obss).to(torch.float32))
-                    prob_preds, value_preds = self.forward(torch.tensor(obss).to(torch.float32))
-                    avg_val_loss = self._loss(
-                        policy_preds=prob_preds,
-                        value_preds=value_preds,
-                        policy_targets=probs,
-                        value_targets=values
-                    )
-                    avg_train_loss = tot_train_loss/train_steps_since_last_val_step
-                    print(f"epoch: {epoch} | train_loss: {avg_train_loss} | val_loss: {avg_val_loss}", end="\r")
-                    tot_train_loss = 0
-                    train_steps_since_last_val_step = 0
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-        print(f"epoch: {epoch} | train_loss: {avg_train_loss} | val_loss: {avg_val_loss}")
-        return train_buffer, val_buffer, avg_train_loss, avg_val_loss
 
 class MCTSAgent:
     def __init__(

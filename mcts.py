@@ -55,7 +55,7 @@ class MCTS():
         prior, value_estimate = self.pvnet.predict(observation)
         node = self.find_leaf_node(root_node)
         assert node == root_node
-        root_node.expand_node(prior=prior, value_estimate=value_estimate)
+        root_node.expand_node(prior=prior, value_estimate=value_estimate.item())
         self.set_root(root_node)
 
     def set_root(self, root: Node):
@@ -92,7 +92,7 @@ class MCTS():
         else:
             prior, value_estimate = self.pvnet.predict(leaf_node.observation)
 
-            leaf_node.expand_node(prior=prior, value_estimate=value_estimate)
+            leaf_node.expand_node(prior=prior, value_estimate=value_estimate.item())
 
         leaf_node.backprop(root_node=node)
 

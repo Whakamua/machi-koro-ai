@@ -56,8 +56,9 @@ class MachiKoro2:
 
         self.reset()
 
-    def reset(self):
-
+    def reset(self, player_order: Optional[list] = None):
+        if player_order is not None:
+            self._player_order = player_order
         # construct state
         self.state = []
         self._state_indices = {}
@@ -689,14 +690,14 @@ class GymMachiKoro2(gym.Env):
     def _get_info(self):
         return {}
 
-    def reset(self, state: dict | None = None):
+    def reset(self, state: dict | None = None, player_order: Optional[list] = None):
         if state is not None:
             self.set_state(state)
-        else:  
-            self._env.reset()
+        else:
+            self._env.reset(player_order)
         obs = self.observation()
         return obs, self._get_info()
-    
+
     def state_dict(self, state: Optional[np.array] = None):
         return copy.deepcopy(self._env.state_dict(state))
 

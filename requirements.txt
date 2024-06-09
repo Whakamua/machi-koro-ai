@@ -3,3 +3,7 @@ pyyaml
 gym
 numpy
 multielo @ git+https://github.com/djcunningham0/multielo.git
+torch
+ray
+matplotlib
+tabulate
