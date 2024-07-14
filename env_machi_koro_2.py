@@ -16,6 +16,7 @@ class MachiKoro2:
         ):
         self._print_info = print_info
         self._n_players = n_players
+        self._winning_player_index = None
 
         if card_info_path is None:
             card_info_path = "card_info_machi_koro_2.yaml"
@@ -52,13 +53,11 @@ class MachiKoro2:
 
         self._stage_order = ["diceroll", "build"]
         self._n_stages = len(self._stage_order)
-        self._player_order = [f"player {i}" for i in range(self._n_players)]
+        self._player_order = [f"player {i}" for i in range(n_players)]
 
         self.reset()
 
-    def reset(self, player_order: Optional[list] = None):
-        if player_order is not None:
-            self._player_order = player_order
+    def reset(self):
         # construct state
         self.state = []
         self._state_indices = {}
@@ -329,6 +328,11 @@ class MachiKoro2:
             if self.n_of_card_player_owns(player, card) >= 1:
                 return True
         return False
+    
+
+    @property
+    def winning_player_index(self):
+        return self._winning_player_index
 
 
     @property
@@ -545,8 +549,10 @@ class MachiKoro2:
 
     def winner(self):
         if self.player_icon_count(self.current_player, "Landmark") == self._max_landmarks:
+            self._winning_player_index = copy.deepcopy(self.current_player_index)
             return True
         elif self.n_of_card_player_owns(self.current_player, "Launch Pad") == 1:
+            self._winning_player_index = copy.deepcopy(self.current_player_index)
             return True
         else:
             return False
@@ -688,13 +694,13 @@ class GymMachiKoro2(gym.Env):
         return self._env._diceroll(n_dice)
 
     def _get_info(self):
-        return {}
+        return {"winning_player_index": self._env.winning_player_index}
 
-    def reset(self, state: dict | None = None, player_order: Optional[list] = None):
+    def reset(self, state: dict | None = None):
         if state is not None:
             self.set_state(state)
         else:
-            self._env.reset(player_order)
+            self._env.reset()
         obs = self.observation()
         return obs, self._get_info()
 
@@ -707,11 +713,12 @@ class GymMachiKoro2(gym.Env):
     def set_state(self, obs):
         self._env.state = obs
 
-
     def step(self, action, state: dict | None = None):
         if state:
             self.set_state(state)
-        
+
+        assert self.action_mask()[action] == 1, f"Action {self._action_idx_to_str[action]} is not allowed in the current state."
+
         winner = self._env.step(self._action_idx_to_str[action])
         return self.observation(), int(winner), winner, False, self._get_info()
 

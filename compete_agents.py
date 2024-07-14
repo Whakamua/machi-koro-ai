@@ -18,8 +18,10 @@ def deepcopy_obs(obs_space, obs):
 
 def main():
     N_PLAYERS = 2
-    CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
-    MCTS_SIMULATIONS = 100
+    # CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
+    CARD_INFO_PATH = "card_info_machi_koro_2_quick_game.yaml"
+    MCTS_SIMULATIONS_P1 = 100
+    MCTS_SIMULATIONS_P2 = 100
     THINKING_TIME = None
     PUCT = 2
 
@@ -48,7 +50,6 @@ def main():
 
     pvnet_p0 = pvnet_cls(**pvnetp0_kwargs)
     pvnet_p1 = pvnet_cls(**pvnetp1_kwargs)
-    pvnet_p1.load_state_dict(torch.load("pvnet.ckpt"))
 
     elo = MultiElo()
 
@@ -57,8 +58,8 @@ def main():
 
     agents = {
         # "player 0": ManualAgent(env),
-        "player 0": MCTSAgent(env_cls(**env_kwargs, print_info=False), num_mcts_sims=MCTS_SIMULATIONS, c_puct=PUCT, pvnet=pvnet_p0, thinking_time=THINKING_TIME, print_info=False),
-        "player 1": MCTSAgent(env_cls(**env_kwargs, print_info=False), num_mcts_sims=MCTS_SIMULATIONS, c_puct=PUCT, pvnet=pvnet_p1, thinking_time=THINKING_TIME, print_info=False),
+        "player 0": MCTSAgent(env_cls(**env_kwargs, print_info=False), num_mcts_sims=MCTS_SIMULATIONS_P1, c_puct=PUCT, pvnet=pvnet_p0, thinking_time=THINKING_TIME, print_info=False),
+        "player 1": MCTSAgent(env_cls(**env_kwargs, print_info=False), num_mcts_sims=MCTS_SIMULATIONS_P2, c_puct=PUCT, pvnet=pvnet_p1, thinking_time=THINKING_TIME, print_info=False),
     }
     
     cumulative_steps = 0
@@ -68,7 +69,7 @@ def main():
         action_history = []
         done = False
         player_order = [player_order[-1]] + player_order[:-1]
-        obs, info = env.reset(player_order=player_order)
+        obs, info = env.reset(players_in_order=player_order)
         [agent.reset(obs) for agent in agents.values()]
 
         count = 0

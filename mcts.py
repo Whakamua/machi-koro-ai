@@ -26,12 +26,6 @@ class MCTS():
     @property
     def root(self):
         return self._root
-    
-    def update_pvnet(self, state_dict):
-        self.pvnet.use_uniform_pvnet = state_dict["uniform_pvnet"]
-        self.pvnet.use_custom_policy_edit = state_dict["custom_policy_edit"]
-        self.pvnet.use_custom_value = state_dict["custom_value"]
-        self.pvnet.load_state_dict(state_dict["pvnet_state_dict"])
 
     def add_dirichlet(self, node):
         epsilon = 0.25

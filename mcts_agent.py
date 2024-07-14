@@ -110,7 +110,7 @@ class PolicyNet(nn.Module):
         
     
     def loss(self, policy_preds, policy_targets):
-        policy_loss = self.KLDiv(torch.nn.functional.log_softmax(policy_preds), policy_targets)
+        policy_loss = self.KLDiv(torch.nn.functional.log_softmax(policy_preds, dim=1), policy_targets)
         return policy_loss
     
 class ValueNet(nn.Module):
@@ -144,14 +144,12 @@ class ValueNet(nn.Module):
 class PVNet:
     def __init__(
             self,
-            env_cls,
-            env_kwargs,
+            env,
             uniform_pvnet: bool = False,
             custom_policy_edit: bool = False,
             custom_value: bool = False,
             device: str = None,
     ):
-        env = env_cls(**env_kwargs)
         self.env = env
         self.use_uniform_pvnet = uniform_pvnet
         self.use_custom_policy_edit = custom_policy_edit
@@ -224,14 +222,16 @@ class PVNet:
         self._identity_indices_tensor = torch.tensor(np.array(identity_indices), device=self.device, requires_grad=False)
         self._mdoh = MultiDimensionalOneHot(one_hot_values)
 
+        self.KLDiv = torch.nn.KLDivLoss(reduction="batchmean")
+
+        self.reset_weights()
+
+    def reset_weights(self):
         num_inputs = self._mdoh.one_hot_len + len(self._identity_indices)
         num_outputs = self.env.action_space.n
-
         self.policy_net = PolicyNet(num_inputs, num_outputs, device=self.device)
         self.value_net = ValueNet(num_inputs, 1, device=self.device)
-        
         self.is_trained = False
-        self.KLDiv = torch.nn.KLDivLoss(reduction="batchmean")
 
     def add_layer(self, module, name, f_in, f_out, nonlinearity, device, layer_norm=True):
         layer = nn.Linear(f_in, f_out, device=device)
@@ -292,12 +292,19 @@ class PVNet:
             buffer: Buffer | None = None,
             train_buffer: Buffer | None = None,
             val_buffer: Buffer | None = None,
+            reset_weights: bool = False,
         ):
+        if reset_weights:
+            self.reset_weights()
+
         if buffer is not None:
-            buffer.compute_values()
+            assert buffer.values_computed, "buffer values not computed"
             train_buffer, val_buffer = buffer.split_buffer_by_episode(train_val_split)
         else:
             assert train_buffer is not None and val_buffer is not None
+            assert train_buffer.values_computed, "train_buffer values not computed"
+            assert val_buffer.values_computed, "val_buffer values not computed"
+
         self.x_mean = torch.tensor(train_buffer.obss[:, self._identity_indices].mean(axis=0).astype(np.float32), device=self.device, requires_grad=False)
         self.x_std = torch.tensor(train_buffer.obss[:, self._identity_indices].std(axis=0).astype(np.float32), device=self.device, requires_grad=False)
 
@@ -334,19 +341,17 @@ class PVNet:
 
             with torch.no_grad():
                 if not policy_done:
-                    prob_preds = self.policy_net(torch.tensor(obss_val))
-                    avg_val_policy_loss = self.policy_net.loss(prob_preds, torch.tensor(probs_val))
+                    prob_preds = self.policy_net(obss_val)
+                    avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
 
                     if policy_early_stopping.update(avg_val_policy_loss, epoch, self.policy_net.state_dict()):
-                        print("policy net is done!")
                         policy_done = True
 
                 if not value_done:
-                    value_preds = self.value_net(torch.tensor(obss_val))
-                    avg_val_value_loss = self.value_net.loss(value_preds, torch.tensor(values_val))
+                    value_preds = self.value_net(obss_val)
+                    avg_val_value_loss = self.value_net.loss(value_preds, values_val)
 
                     if value_early_stopping.update(avg_val_value_loss, epoch, self.value_net.state_dict()):
-                        print("value net is done!")
                         value_done = True
             
             if policy_done and value_done:
@@ -358,13 +363,12 @@ class PVNet:
             tot_train_value_loss = 0
             train_steps_since_last_val_step = 0
             n_batches = len(indices_for_all_batches)
-            print(n_batches)
             for i, batch_indices in enumerate(indices_for_all_batches):
                 train_steps_since_last_val_step += 1
 
                 if not policy_done:
-                    prob_preds = self.policy_net(torch.tensor(obss_train[batch_indices]))
-                    policy_loss = self.policy_net.loss(prob_preds, torch.tensor(probs_train[batch_indices]))
+                    prob_preds = self.policy_net(obss_train[batch_indices])
+                    policy_loss = self.policy_net.loss(prob_preds, probs_train[batch_indices])
 
                     policy_optimizer.zero_grad()
                     policy_loss.backward()
@@ -374,8 +378,8 @@ class PVNet:
                     avg_train_policy_loss = tot_train_policy_loss/train_steps_since_last_val_step
 
                 if not value_done:
-                    value_preds = self.value_net(torch.tensor(obss_train[batch_indices]))
-                    value_loss = self.value_net.loss(value_preds, torch.tensor(values_train[batch_indices]))
+                    value_preds = self.value_net(obss_train[batch_indices])
+                    value_loss = self.value_net.loss(value_preds, values_train[batch_indices])
 
                     value_optimizer.zero_grad()
                     value_loss.backward()
@@ -389,16 +393,16 @@ class PVNet:
                 if i % 100 == 0:
                     with torch.no_grad():
                         if not policy_done:
-                            prob_preds = self.policy_net(torch.tensor(obss_val))
-                            avg_val_policy_loss = self.policy_net.loss(prob_preds, torch.tensor(probs_val))
+                            prob_preds = self.policy_net(obss_val)
+                            avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
 
                         if not value_done:
-                            value_preds = self.value_net(torch.tensor(obss_val))
-                            avg_val_value_loss = self.value_net.loss(value_preds, torch.tensor(values_val))
+                            value_preds = self.value_net(obss_val)
+                            avg_val_value_loss = self.value_net.loss(value_preds, values_val)
 
                         avg_val_loss = avg_val_policy_loss + avg_val_value_loss
 
-                        print(f"epoch: {epoch} {round(i/n_batches * 100)}% | train_loss | {avg_train_loss} | val_loss: {avg_val_loss} | train_policy_loss: {avg_train_policy_loss} | train_value_loss: {avg_train_value_loss} | val_policy_loss: {avg_val_policy_loss} | val_value_loss: {avg_val_value_loss} | policy_done: {policy_done} | value_done: {value_done}", end="\r")
+                        print(f"e: {epoch} {round(i/n_batches * 100)}% | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}", end="\r")
                         mlflow.log_metric("epoch", epoch, step=i)
                         mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=i)
                         mlflow.log_metric("train_value_loss", avg_train_value_loss, step=i)
@@ -416,7 +420,8 @@ class PVNet:
         self.policy_net.load_state_dict(policy_early_stopping.best_params)
         self.value_net.load_state_dict(value_early_stopping.best_params)
 
-        print(f"epoch: {epoch} | train_loss | {avg_train_loss} | val_loss: {avg_val_loss} | train_policy_loss: {avg_train_policy_loss} | train_value_loss: {avg_train_value_loss} | val_policy_loss: {avg_val_policy_loss} | val_value_loss: {avg_val_value_loss} | policy_done: {policy_done} | value_done: {value_done}")
+        print(f"e: {epoch} | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}")
+        print("training done")
         return train_buffer, val_buffer, avg_train_loss, avg_val_loss
 
     def save(self, folder):
@@ -577,8 +582,19 @@ class MCTSAgent:
         self.mcts = MCTS(env, pvnet, num_mcts_sims, c_puct, dirichlet_to_root_node, thinking_time, print_info)
         warnings.warn("Not using any temperature in probs, might need that for first n actions")
 
-    def update_pvnet(self, state_dict):
-        self.mcts.update_pvnet(state_dict)
+    def get_state_dict(self):
+        return {
+            "uniform_pvnet": self.mcts.pvnet.use_uniform_pvnet,
+            "custom_policy_edit": self.mcts.pvnet.use_custom_policy_edit,
+            "custom_value": self.mcts.pvnet.use_custom_value,
+            "weights": self.mcts.pvnet.state_dict()
+        }
+
+    def set_state_dict(self, state_dict):
+        self.mcts.pvnet.use_uniform_pvnet = state_dict["uniform_pvnet"]
+        self.mcts.pvnet.use_custom_policy_edit = state_dict["custom_policy_edit"]
+        self.mcts.pvnet.use_custom_value = state_dict["custom_value"]
+        self.mcts.pvnet.load_state_dict(state_dict["weights"])
 
     def reset(self, env_state):
         self.mcts.reset(env_state=env_state)

@@ -18,6 +18,14 @@ class Buffer:
         return BigBuffer(self._observation_space, self._action_space)
 
     @property
+    def action_space(self):
+        return self._action_space
+    
+    @property
+    def observation_space(self):
+        return self._observation_space
+
+    @property
     def isfull(self):
         return self._size == self._capacity
     
@@ -284,7 +292,6 @@ class Buffer:
 class BigBuffer(Buffer):
     def __init__(self, observation_space, action_space):
         super().__init__(observation_space, action_space, capacity=None)
-    
     def combine_buffers(self, buffers: list[Buffer]):
         self._size = sum([buffer.size for buffer in buffers])
         self._capacity = self._size
@@ -295,6 +302,8 @@ class BigBuffer(Buffer):
         episode_number = 0
 
         for buffer in buffers:
+            buffer.values_computed, "values must be computed before combining buffers"
+
             for episode, episode_length in buffer._episode_lengths.items():
                 bigbuffer_start_index = bigbuffer_end_index + 1
                 bigbuffer_end_index += episode_length
@@ -306,3 +315,4 @@ class BigBuffer(Buffer):
                 self._episode_lengths[episode_number] = episode_length
                 episode_number += 1
             del buffer
+        self.values_computed = True
