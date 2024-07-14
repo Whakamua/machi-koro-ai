@@ -1,0 +1,264 @@
+Sushi Bar:
+  n_cards: 5
+  cost: 2
+  activation: [1]
+  icon: Cup
+  type: Restaurant (Red)
+  transfer: 3
+Wheat Field:
+  n_cards: 5
+  cost: 1
+  activation: [1,2]
+  icon: Grain
+  type: Primary Industry (Blue)
+  transfer: 1
+Vineyard:
+  n_cards: 5
+  cost: 1
+  activation: [2]
+  icon: Fruit
+  type: Primary Industry (Blue)
+  transfer: 2
+Bakery:
+  n_cards: 5
+  cost: 1
+  activation: [2,3]
+  icon: Bread
+  type: Secondary Industry (Green)
+  transfer: 2
+Café:
+  n_cards: 5
+  cost: 1
+  activation: [3]
+  icon: Cup
+  type: Restaurant (Red)
+  transfer: 2
+Convenience Store:
+  n_cards: 5
+  cost: 1
+  activation: [4]
+  icon: Bread
+  type: Secondary Industry (Green)
+  transfer: 3
+Flower Garden:
+  n_cards: 5
+  cost: 2
+  activation: [4]
+  icon: Flower
+  type: Primary Industry (Blue)
+  transfer: 2
+Forest:
+  n_cards: 5
+  cost: 3
+  activation: [5]
+  icon: Gear
+  type: Primary Industry (Blue)
+  transfer: 2
+# Business Center:
+#   n_cards: 3
+#   cost: 3
+#   activation: [6]
+#   icon: Temple
+#   type: Major (Purple)
+#   transfer: null
+Flower Shop:
+  n_cards: 3
+  cost: 1
+  activation: [6]
+  icon: Combo
+  combo: Flower
+  type: Secondary Industry (Green)
+  transfer: 3
+Stadium:
+  n_cards: 3
+  cost: 3
+  activation: [7]
+  icon: Temple (Purple)
+  type: Major (Purple) 
+  transfer: null
+Corn Field:
+  n_cards: 5
+  cost: 2
+  activation: [7]
+  icon: Grain
+  type: Primary Industry (Blue)
+  transfer: 3
+Furniture Factory:
+  n_cards: 3
+  cost: 4
+  activation: [8]
+  icon: Combo
+  combo: Gear
+  type: Secondary Industry (Green)
+  transfer: 4
+Hamburger Stand:
+  n_cards: 5
+  cost: 1
+  activation: [8]
+  icon: Cup
+  type: Restaurant (Red)
+  transfer: 1
+Shopping District:
+  n_cards: 3
+  cost: 3
+  activation: [8,9]
+  icon: Temple
+  type: Major (Purple)
+  transfer: null
+Winery:
+  n_cards: 3
+  cost: 3
+  activation: [9]
+  icon: Combo
+  combo: Fruit
+  type: Secondary Industry (Green)
+  transfer: 3
+Family Restaurant:
+  n_cards: 5
+  cost: 2
+  activation: [9,10]
+  icon: Cup
+  type: Restaurant (Red)
+  transfer: 2
+Apple Orchard:
+  n_cards: 5
+  cost: 1
+  activation: [10]
+  icon: Fruit
+  type: Primary Industry (Blue)
+  transfer: 3
+Food Warehouse:
+  n_cards: 3
+  cost: 2
+  activation: [10,11]
+  icon: Combo
+  combo: Cup
+  type: Secondary Industry (Green)
+  transfer: 2
+Mine:
+  n_cards: 5
+  cost: 4
+  activation: [11,12]
+  icon: Gear
+  type: Primary Industry (Blue)
+  transfer: 6
+Amusement Park:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Airport:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Museum:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Exhibit Hall:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+TV Station:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Radio Tower:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Temple:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Charterhouse:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Park:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Soda Bottling Plant:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Forge:
+  n_cards: 1
+  cost: [4,6,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+French Restaurant:
+  n_cards: 1
+  cost: [3,5,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Observatory:
+  n_cards: 1
+  cost: [3,5,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+# Moving Company:
+#   n_cards: 1
+#   cost: [3,5,8]
+#   type: Landmark
+#   icon: Landmark
+#   transfer: null
+Publisher:
+  n_cards: 1
+  cost: [3,5,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Farmers Market:
+  n_cards: 1
+  cost: [3,5,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Shopping Mall:
+  n_cards: 1
+  cost: [3,5,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Tech Startup:
+  n_cards: 1
+  cost: [3,5,8]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Loan Office:
+  n_cards: 1
+  cost: [4]
+  type: Landmark
+  icon: Landmark
+  transfer: null
+Launch Pad:
+  n_cards: 1
+  cost: [20, 15, 10]
+  type: Landmark
+  icon: Landmark
+  transfer: null
