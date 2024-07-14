@@ -43,56 +43,40 @@ GAME_STATE_EMPTY_DECKS = np.array([ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  
 class MCTSActor:
     def __init__(
             self,
-            worker_id,
-            env_cls,
-            env_kwargs,
-            agent_cls,
-            agent_kwargs,
-            env_start_state,
-            buffer_capacity,
+            worker_id
         ):
         self._worker_id = worker_id
         seed_all(self._worker_id)
-        self._env = env_cls(**env_kwargs)
-        self._agents = {
-            i: agent_cls(env=copy.deepcopy(self._env), **agent_kwargs) for i in range(self._env.n_players)
-        }
-        self._env_start_state = env_start_state
-        self._buffer_capacity = buffer_capacity
 
     def play_game(
             self,
             game_id,
-            agent_state_dicts,
+            env,
+            game_start_state,
+            agents,
+            buffer,
         ):
-
         t00 = time.time()
-        obs, info = self._env.reset(self._env_start_state)
+        env = copy.deepcopy(env)
+        obs, info = env.reset(copy.deepcopy(game_start_state))
 
-        for i in agent_state_dicts.keys():
-            self._agents[i].set_state_dict(agent_state_dicts[i]["state_dict"])
+        agents = copy.deepcopy(agents)
+        [agent["agent"].reset(obs) for agent in agents.values()]
 
-        [agent.reset(obs) for agent in self._agents.values()]
-
-        buffer = Buffer(
-            observation_space=self._env.observation_space,
-            action_space=self._env.action_space,
-            capacity=self._buffer_capacity,
-        )
+        buffer = copy.deepcopy(buffer)
 
         steps = 0
-        # t0 = time.time()
+        t0 = time.time()
 
         done = False
 
         while not done:
-            action_mask = self._env.action_mask()
-            current_player_index = obs[self._env.observation_indices["current_player_index"]]
-            action, probs = self._agents[current_player_index].compute_action(obs)
-            
+            action_mask = env.action_mask()
+            current_player_index = obs[env.observation_indices["current_player_index"]]
+            action, probs = agents[current_player_index]["agent"].compute_action(obs)
 
             # print(f"worker: {worker_id} | game: {game_id} | steps: {steps} | buffer_size: {buffer.size} | player {env.current_player_index} played {env._action_idx_to_str[action]} | coins = {env._env.player_coins(env.current_player)}")
-            next_obs, reward, done, truncated, info = self._env.step(action)     
+            next_obs, reward, done, truncated, info = env.step(action)     
             steps += 1
             if buffer is not None:
                 buffer.add(
@@ -104,9 +88,10 @@ class MCTSActor:
                     probs=probs,
                     current_player_index=current_player_index,
                     action_mask=action_mask,
-                    value_pred=self._agents[current_player_index].mcts.root.value_estimate,
-                    value_mcts=self._agents[current_player_index].mcts.root.value
+                    value_pred=agents[current_player_index]["agent"].mcts.root.value_estimate,
+                    value_mcts=agents[current_player_index]["agent"].mcts.root.value
                 )
+                
             
             # if steps % 10 == 0:
             #     print(f"game_id {game_id} time for 10 steps: {time.time() - t0}")
@@ -116,29 +101,30 @@ class MCTSActor:
                 if buffer is not None:
                     buffer.compute_values()
                     time_taken = time.time() - t00
-                    winner = agent_state_dicts[info["winning_player_index"]]["name"]
+                    winner = agents[info["winning_player_index"]]["name"]
+                    # del env
+                    # del agents
                 return buffer, time_taken, game_id, winner
 
             if buffer is not None and buffer.isfull:
                 buffer.compute_values()
                 time_taken = time.time() - t00
                 winning_player_index = info["winning_player_index"]
-                winner = agent_state_dicts[winning_player_index]["name"] if winning_player_index is not None else None
+                winner = agents[winning_player_index]["name"] if winning_player_index is not None else None
+                # del env
+                # del agents
                 return buffer, time_taken, game_id, winner
             obs = next_obs
+
 
 class Pit:
     def __init__(
         self,
-        env_cls,
-        env_kwargs,
-        agent_cls,
-        agent_kwargs,
-        game_start_state,
-        buffer_capacity,
+        env,
         use_ray,
         games_per_addition=30,
     ):
+        self._env = env
         self._agents = {}
         self._elo = MultiElo()
         self._use_ray = use_ray
@@ -151,13 +137,13 @@ class Pit:
             self._actor_pool = ActorPool(
                 [
                     ray.remote(MCTSActor).remote(
-                        worker_id=i, env_cls=env_cls, env_kwargs=env_kwargs, agent_cls=agent_cls, agent_kwargs=agent_kwargs, env_start_state=game_start_state, buffer_capacity=buffer_capacity
+                        worker_id=i
                     ) for i in range(n_workers)
                 ]
             )
         else:
             self.actor = MCTSActor(
-                worker_id=0, env_cls=env_cls, env_kwargs=env_kwargs, agent_cls=agent_cls, agent_kwargs=agent_kwargs, env_start_state=game_start_state, buffer_capacity=buffer_capacity
+                worker_id=0
             )
 
 
@@ -181,7 +167,7 @@ class Pit:
         self._compute_ratings_with_1_new_agent(self._games_per_addition, start_state)
 
     def get_agent_dict(self, agent_pair):
-        return {i: {"name": agent_name, "state_dict": self._agents[agent_name]["agent"].get_state_dict()} for i, agent_name in enumerate(agent_pair)}
+        return {i: {"name": agent_name, "agent": self._agents[agent_name]["agent"]} for i, agent_name in enumerate(agent_pair)}
 
     def _compute_ratings_with_1_new_agent(
         self,
@@ -202,11 +188,11 @@ class Pit:
 
         if self._use_ray:
             actor_generator = self._actor_pool.map_unordered(
-                lambda a, v: a.play_game.remote(v, self.get_agent_dict(agent_pairs_per_game_id[v]), None),
+                lambda a, v: a.play_game.remote(v, self._env, start_state, self.get_agent_dict(agent_pairs_per_game_id[v]), None),
                 game_ids,
             )
         else:
-            actor_generator = (self.actor.play_game(v, self.get_agent_dict(agent_pairs_per_game_id[v]), None) for v in game_ids)
+            actor_generator = (self.actor.play_game(v, self._env, start_state, self.get_agent_dict(agent_pairs_per_game_id[v]), None) for v in game_ids)
 
         for buffer, time_taken, game_id, winner in actor_generator:
             if winner is None:
@@ -243,7 +229,7 @@ def main():
     LR = 0.001
     WEIGHT_DECAY = 1e-5
     N_PLAYERS = 2
-    BUFFER_CAPACITY = 1000
+    BUFFER_CAPACITY = 10
 
     use_ray = True
     # with open("src/checkpoints/9.pkl", "rb") as file:
@@ -260,25 +246,11 @@ def main():
     env_kwargs = {"n_players": N_PLAYERS, "card_info_path": CARD_INFO_PATH}
     env = env_cls(**env_kwargs)
 
-    pvnet_for_training = PVNet(env)
-    agent_cls = MCTSAgent
-    agent = agent_cls(
+    pit = Pit(
         env=env,
-        num_mcts_sims=MCTS_SIMULATIONS,
-        c_puct=PUCT,
-        pvnet=pvnet_for_training
+        use_ray=use_ray,
+        games_per_addition=30,
     )
-    agent_kwargs = {
-        "num_mcts_sims": MCTS_SIMULATIONS,
-        "c_puct": PUCT,
-        "pvnet": pvnet_for_training
-    }
-    print("WARNING: USING VERY SIMPLE START STATE")
-    env.reset()
-    state = env.state_dict()
-    state["player_info"]["player 0"]["coins"] = 29
-    state["player_info"]["player 1"]["coins"] = 29
-    GAME_START_STATE = env.state_dict_to_array(state)
 
     GAME_START_STATE = None
     # GAME_START_STATE = GAME_STATE_EMPTY_DECKS
@@ -295,30 +267,29 @@ def main():
     # GAME_START_STATE[temp_env.observation_indices["marketplace"]["1-6"]["pos_0"]["count"]] = 2
     # env.reset(GAME_START_STATE)
 
-    pit = Pit(
-        env_cls=env_cls,
-        env_kwargs=env_kwargs,
-        agent_cls=agent_cls,
-        agent_kwargs=agent_kwargs,
-        game_start_state=GAME_START_STATE,
-        buffer_capacity=BUFFER_CAPACITY,
-        use_ray=use_ray,
-        games_per_addition=30,
-    )
 
+    observation_space = env.observation_space
+    action_space = env.action_space
+    pvnet_for_training = PVNet(env)
+    agent = MCTSAgent(
+        env=env,
+        num_mcts_sims=MCTS_SIMULATIONS,
+        c_puct=PUCT,
+        pvnet=pvnet_for_training
+    )
     if use_ray:
         n_workers = int(ray.available_resources()["CPU"] - 1)
         print(f"Found {n_workers} CPU cores available for workers")
         actor_pool = ActorPool(
             [
                 ray.remote(MCTSActor).remote(
-                    worker_id=i, env_cls=env_cls, env_kwargs=env_kwargs, agent_cls=agent_cls, agent_kwargs=agent_kwargs, env_start_state=GAME_START_STATE, buffer_capacity=BUFFER_CAPACITY
+                    worker_id=i
                 ) for i in range(n_workers)
             ]
         )
     else:
         actor = MCTSActor(
-            worker_id=0, env_cls=env_cls, env_kwargs=env_kwargs, agent_cls=agent_cls, agent_kwargs=agent_kwargs, env_start_state=GAME_START_STATE, buffer_capacity=BUFFER_CAPACITY
+            worker_id=0
         )
 
     checkpoint_dir = "checkpoints/" + str(datetime.datetime.now())
@@ -345,33 +316,46 @@ def main():
         print("##################################################################################")
         t1 = time.time()
 
+        buffer = Buffer(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            capacity=BUFFER_CAPACITY,
+        )
+
+        print("WARNING: USING VERY SIMPLE START STATE")
+        env.reset()
+        state = env.state_dict()
+        state["player_info"]["player 0"]["coins"] = 29
+        state["player_info"]["player 1"]["coins"] = 29
+        GAME_START_STATE = env.state_dict_to_array(state)
+
         game_ids = np.arange(GAMES_PER_ITERATION)
         if use_ray:
             actor_generator = actor_pool.map_unordered(
-                lambda a, v: a.play_game.remote(v, {i: {"name": agent["name"], "state_dict": agent["agent"].get_state_dict()} for i, agent in training_agents.items()}),
+                lambda a, v: a.play_game.remote(v, env, GAME_START_STATE, training_agents, buffer),
                 game_ids,
             )
         else:
-            actor_generator = (actor.play_game(v, {i: {"name": agent["name"], "state_dict": agent["agent"].get_state_dict()} for i, agent in training_agents.items()}) for v in game_ids)
+            actor_generator = (actor.play_game(v, env, GAME_START_STATE, training_agents, buffer) for v in game_ids)
 
         steps_collected = 0
         games_played = 0
         time_now = time.time()
 
         wins = {agent["name"]: 0 for agent in training_agents.values()}
-        for buffer, game_time_taken, game_id, winner in actor_generator:
+        for filled_buffer, game_time_taken, game_id, winner in actor_generator:
             games_played += 1
             # print(f"game {game_id} took {time_taken} sec to complete", end="\r" if games_played < len(game_ids) else "\n")
             time_taken = time.time() - time_now
             estimated_time_left = time_taken / games_played * (GAMES_PER_ITERATION - games_played)
-            # steps_collected += buffer.size
+            steps_collected += filled_buffer.size
             pre_append = time.time()
 
             if winner is None:
                 print(f"WARNING: [SelfPlay] game {game_id} had no winner")
                 continue
             else:
-                newest_buffers.append(buffer)
+                newest_buffers.append(filled_buffer)
                 wins[winner] += 1
 
             print(f"game {games_played}/{len(game_ids)}, estimated seconds left: {round(estimated_time_left)}, latest game took {game_time_taken}s to complete, appending buffer took {time.time() - pre_append}", end="\r" if games_played < len(game_ids) else "\n")
