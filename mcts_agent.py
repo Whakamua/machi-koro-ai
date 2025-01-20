@@ -1,7 +1,13 @@
+import h5py
 import numpy as np
 from torch import nn
 import torch
+from torch.utils.data import Dataset, DataLoader
 import warnings
+import re
+import time
+import random
+import pickle
 
 from mcts import MCTS
 import itertools
@@ -9,6 +15,179 @@ from buffer import Buffer
 import copy
 import mlflow
 import os
+
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from env import GymMachiKoro, MachiKoro
+
+class NotEnoughDataError(Exception):
+    pass
+
+class HDF5DataLoader:
+    def __init__(self, file_path, subset_rules, train_split, chunk_size, num_workers=1):
+        """
+        A class to handle HDF5 datasets and generate train and validation DataLoaders.
+
+        Args:
+            file_path (str): Path to the HDF5 file.
+            subset_rules (dict): Rules for selecting rows from iterations/buffers.
+                                 Example: {1: 0.5, 2: 0.5, ..., 6: 1.0, 7: 1.0}
+            train_split (float): Fraction of data to use for training. Rest is for validation.
+            chunk_size (int): Chunk size for DataLoaders.
+            num_workers (int): Number of worker threads for DataLoader.
+        """
+        self.file_path = file_path
+        self.subset_rules = subset_rules
+        self.chunk_size = chunk_size
+        self.num_workers = num_workers
+
+        # Prepare row indices
+        self.train_indices, self.val_indices, self.column_indices = self._prepare_indices()
+        if len(self.train_indices) == 0 or len(self.val_indices) == 0:
+            raise NotEnoughDataError("Not enough data to create train and validation sets.")
+
+        # Create DataLoaders
+        self.train_loader = self._create_dataloader(self.train_indices, self.column_indices, "train")
+        self.val_loader = self._create_dataloader(self.val_indices, self.column_indices, "val")
+
+    def get_column_indices_regex(self, column_names, regex):
+        r_filter = re.compile(regex)
+        vmatch = np.vectorize(lambda x:bool(r_filter.match(x)))
+        return np.where(vmatch(column_names))[0]
+    
+    def _prepare_indices_for_split(self, split):
+        with h5py.File(self.file_path, "r") as h5f:
+            vds_sources = []
+            for iteration, fraction in self.subset_rules.items():
+                if fraction == 0.0:
+                    continue
+                grp = h5f[split][iteration]
+                games = list(grp.keys())
+                vds_sources.extend([(iteration, game) for game in games])
+        return vds_sources
+
+
+    def _prepare_indices(self):
+        """Generate row indices based on subset rules."""
+
+        train_row_indices = self._prepare_indices_for_split("train")
+        val_row_indices = self._prepare_indices_for_split("val")
+
+        with h5py.File(self.file_path, "r") as h5f:
+            column_indices = {
+                "obs": self.get_column_indices_regex(h5f.attrs["columns"], r"obs\d+"),
+                "values": self.get_column_indices_regex(h5f.attrs["columns"], r"\bvalue\b"),
+                "probs": self.get_column_indices_regex(h5f.attrs["columns"], r"prob\d+"),
+            }
+
+        return train_row_indices, val_row_indices, column_indices
+
+    def _create_dataloader(self, indices, column_indices, split):
+        """Create a DataLoader from the given indices."""
+        return HDF5Dataset(self.file_path, indices, column_indices, self.chunk_size, split)
+
+    def get_dataloaders(self):
+        """Return the train and validation DataLoaders."""
+        return self.train_loader, self.val_loader
+
+
+
+class HDF5Dataset:
+    def __init__(self, file_path, buffer_indices, column_indices: dict[str, np.ndarray[int]], chunk_size, split):
+        """
+        Args:
+            file_path (str): Path to the HDF5 file.
+            buffer_indices (list): List of tuples (iteration, buffer).
+        """
+        self.file_path = file_path
+        self.buffer_indices = buffer_indices
+        self.column_indices = column_indices
+        self.sorted_column_indices_permutation = np.argsort(np.concatenate(list(self.column_indices.values())))
+        self.sorted_column_indices = np.concatenate(list(self.column_indices.values()))[self.sorted_column_indices_permutation]
+        self.vds_indices = {}
+        col_counter = 0
+
+        for name, cols in column_indices.items():
+            self.vds_indices[name] = self.sorted_column_indices_permutation[col_counter: col_counter+len(cols)]
+            col_counter += len(cols)
+
+        self.n_columns = sum(len(indices) for indices in self.column_indices.values())
+        self.chunk_size = chunk_size
+        self.split = split
+
+        self.shuffle()
+
+
+    def shuffle(self):
+        self.vds_names = []
+        self.tot_rows = 0
+        def create_vds(h5f: h5py.File, buffers_for_chunk, total_rows):
+            vds_name = f"VDS_{self.split}_{len(self.vds_names)}"
+            self.vds_names.append(vds_name)
+            vds_layout = h5py.VirtualLayout(shape=(total_rows, self.n_columns), dtype='float64')
+            row_number = 0
+            for (iteration, buffer_name) in buffers_for_chunk:
+                virtual_source = h5py.VirtualSource(h5f[self.split][iteration][buffer_name])
+                # filling only the columns that are in the column_indices
+                vds_layout[row_number:row_number+virtual_source.shape[0], :] = virtual_source[:, self.sorted_column_indices]
+                row_number += virtual_source.shape[0]
+
+            h5f.create_virtual_dataset(vds_name, vds_layout)
+
+        random.shuffle(self.buffer_indices)
+        with h5py.File(self.file_path, "a") as h5f:
+            for key in h5f.keys():
+                if key.startswith(f"VDS_{self.split}_"):
+                    del h5f[key]
+            n_rows = 0
+            buffers_for_chunk = []
+            for buffer_index in self.buffer_indices:
+                iteration, buffer_name = buffer_index
+                rows_in_bufffer = h5f[self.split][iteration][buffer_name].shape[0]
+                self.tot_rows += rows_in_bufffer
+                n_rows += rows_in_bufffer
+                buffers_for_chunk.append(buffer_index)
+                if n_rows >= self.chunk_size:
+                    create_vds(h5f, buffers_for_chunk, n_rows)
+                    n_rows = 0
+                    buffers_for_chunk = []
+            if n_rows > 0:
+                create_vds(h5f, buffers_for_chunk, n_rows)
+
+
+    def __len__(self):
+        """Return the total number of chunks in the dataset."""
+        return len(self.vds_names)
+
+    def __getitem__(self, idx):
+        """Load a single row by index."""
+
+        vds_name = self.vds_names[idx]
+        with h5py.File(self.file_path, "r") as h5f:
+            # Note to self, it is not needed to filter out rows where done is 1, since the data
+            # is stored as obs, 
+            data = h5f[vds_name][:]
+
+        return {
+            data_name: torch.tensor(data[:, indices], dtype=torch.float32)
+            for data_name, indices in self.vds_indices.items()
+        }
+    
+    def __iter__(self):
+        """Initialize the iterator."""
+        self.current_index = 0
+        return self
+
+    def __next__(self):
+        """Fetch the next chunk of data during iteration."""
+        if self.current_index >= len(self):
+            raise StopIteration
+        result = self[self.current_index]
+        self.current_index += 1
+        return result
 
 class MultiDimensionalOneHot:
     def __init__(self, values, device: str = None):
@@ -281,52 +460,47 @@ class PVNet:
     def scale_x(self, x):
         x[:, self._identity_indices_tensor] = (x[:, self._identity_indices_tensor] - self.x_mean) / self.x_std
         return x
+    
+    def _process_chunk(self, chunk: dict[str, torch.Tensor]):
+        obss = chunk["obs"].float()
+        obss = self.obss_to_onehot(obss)
+        values = chunk["values"].float()
+        probs = chunk["probs"].float()
+        obss, values, probs = obss.to(self.device), values.to(self.device), probs.to(self.device)
+        return obss, values, probs
 
-    def train(
-            self,
-            batch_size,
-            epochs,
-            train_val_split,
-            lr,
-            weight_decay,
-            buffer: Buffer | None = None,
-            train_buffer: Buffer | None = None,
-            val_buffer: Buffer | None = None,
-            reset_weights: bool = False,
-        ):
+    def train_hdf5(
+        self,
+        batch_size: int,
+        epochs: int,
+        train_val_split: float,
+        lr: float,
+        weight_decay: float,
+        hdf5_file_path: str,
+        subset_rules: dict,
+        reset_weights: bool = False,
+    ):
+
+        try:
+            # Initialize the data loader manager
+            data_manager = HDF5DataLoader(
+                file_path=hdf5_file_path,
+                subset_rules=subset_rules,
+                train_split=train_val_split,
+                chunk_size=int(64e4),
+                num_workers=1,
+            )
+        except NotEnoughDataError:
+            warnings.warn("Not enough data to train the model.")
+            return None
+        
+        train_loader, val_loader = data_manager.get_dataloaders()
+
         if reset_weights:
             self.reset_weights()
-
-        if buffer is not None:
-            assert buffer.values_computed, "buffer values not computed"
-            train_buffer, val_buffer = buffer.split_buffer_by_episode(train_val_split)
-        else:
-            assert train_buffer is not None and val_buffer is not None
-            assert train_buffer.values_computed, "train_buffer values not computed"
-            assert val_buffer.values_computed, "val_buffer values not computed"
-
-        self.x_mean = torch.tensor(train_buffer.obss[:, self._identity_indices].mean(axis=0).astype(np.float32), device=self.device, requires_grad=False)
-        self.x_std = torch.tensor(train_buffer.obss[:, self._identity_indices].std(axis=0).astype(np.float32), device=self.device, requires_grad=False)
-
-
+        
         avg_train_loss = None
         avg_val_loss = None
-        epoch = 0
-
-        obss_train, _, _, _, _, _, _, values_train, _, _, probs_train = train_buffer[:]
-        obss_train = torch.tensor(obss_train.astype(np.float32))
-        obss_train = self.obss_to_onehot(obss_train)
-        values_train = torch.tensor(values_train.astype(np.float32))
-        probs_train = torch.tensor(probs_train.astype(np.float32))
-        obss_train, values_train, probs_train = obss_train.to(self.device), values_train.to(self.device), probs_train.to(self.device)
-
-        obss_val, _, _, _, _, _, _, values_val, _, _, probs_val = val_buffer[:]
-        obss_val = torch.tensor(obss_val.astype(np.float32))
-        obss_val = self.obss_to_onehot(obss_val)
-        values_val = torch.tensor(values_val.astype(np.float32))
-        probs_val = torch.tensor(probs_val.astype(np.float32))
-        obss_val, values_val, probs_val = obss_val.to(self.device), values_val.to(self.device), probs_val.to(self.device)
-
 
         policy_optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr, weight_decay=weight_decay)
         value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=lr, weight_decay=weight_decay)
@@ -338,91 +512,127 @@ class PVNet:
         value_done = False
 
         for epoch in range(epochs):
-
+            time_n = time.time()
             with torch.no_grad():
                 if not policy_done:
-                    prob_preds = self.policy_net(obss_val)
-                    avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
+                    sum_of_avg_val_policy_loss = 0
+                    time_val = time.time()
+                    for val_chunk in val_loader:
+                        print("time first val chunk", time.time()-time_val)
+                        obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                        prob_preds = self.policy_net(obss_val)
+                        sum_of_avg_val_policy_loss += self.policy_net.loss(prob_preds, probs_val)
+                        print("val chunk took", time.time()-time_val)
+                    
+                    avg_val_policy_loss = sum_of_avg_val_policy_loss / len(val_loader)
 
                     if policy_early_stopping.update(avg_val_policy_loss, epoch, self.policy_net.state_dict()):
                         policy_done = True
 
                 if not value_done:
-                    value_preds = self.value_net(obss_val)
-                    avg_val_value_loss = self.value_net.loss(value_preds, values_val)
-
+                    sum_of_avg_val_value_loss = 0
+                    for val_chunk in val_loader:
+                        obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                        value_preds = self.value_net(obss_val)
+                        sum_of_avg_val_value_loss += self.value_net.loss(value_preds, values_val)
+                    avg_val_value_loss = sum_of_avg_val_value_loss / len(val_loader)
                     if value_early_stopping.update(avg_val_value_loss, epoch, self.value_net.state_dict()):
                         value_done = True
             
             if policy_done and value_done:
                 break
+            
+            print("early stopping eval took", time.time()-time_n)
 
-            indices_for_all_batches = train_buffer.get_random_batch_indices(batch_size)
-
+            train_loader.shuffle()
             tot_train_policy_loss = 0
             tot_train_value_loss = 0
             train_steps_since_last_val_step = 0
-            n_batches = len(indices_for_all_batches)
-            for i, batch_indices in enumerate(indices_for_all_batches):
-                train_steps_since_last_val_step += 1
+            time_pre_first_train_chunk = time.time()
+            n_rows_in_train_loader = train_loader.tot_rows
+            n_rows_trained_on_in_epoch = 0
+            for train_chunk in train_loader:
+                print("time first train chunk", time.time()-time_pre_first_train_chunk)
+                time_train = time.time()
+                obss_train, values_train, probs_train = self._process_chunk(train_chunk)
 
-                if not policy_done:
-                    prob_preds = self.policy_net(obss_train[batch_indices])
-                    policy_loss = self.policy_net.loss(prob_preds, probs_train[batch_indices])
+                def split_array(arr, chunk_size):
+                    return [arr[i:i + chunk_size] for i in range(0, len(arr), chunk_size)]
 
-                    policy_optimizer.zero_grad()
-                    policy_loss.backward()
-                    policy_optimizer.step()
+                indices_for_all_batches = split_array(np.arange(obss_train.shape[0]), batch_size)
+                
+                # np.array_split(np.arange(obss_train.shape[0]), math.ceil(obss_train.shape[0] / batch_size)) 
+                for i, batch_indices in enumerate(indices_for_all_batches):
+                    n_rows_trained_on_in_epoch += len(batch_indices)
+                    train_steps_since_last_val_step += 1
 
-                    tot_train_policy_loss += policy_loss.detach()
-                    avg_train_policy_loss = tot_train_policy_loss/train_steps_since_last_val_step
+                    if not policy_done:
+                        prob_preds = self.policy_net(obss_train[batch_indices])
+                        policy_loss = self.policy_net.loss(prob_preds, probs_train[batch_indices])
 
-                if not value_done:
-                    value_preds = self.value_net(obss_train[batch_indices])
-                    value_loss = self.value_net.loss(value_preds, values_train[batch_indices])
+                        policy_optimizer.zero_grad()
+                        policy_loss.backward()
+                        policy_optimizer.step()
 
-                    value_optimizer.zero_grad()
-                    value_loss.backward()
-                    value_optimizer.step()
+                        tot_train_policy_loss += policy_loss.detach()
+                        avg_train_policy_loss = tot_train_policy_loss/train_steps_since_last_val_step
+                    
+                    if not value_done:
+                        value_preds = self.value_net(obss_train[batch_indices])
+                        value_loss = self.value_net.loss(value_preds, values_train[batch_indices])
 
-                    tot_train_value_loss += value_loss.detach()
-                    avg_train_value_loss = tot_train_value_loss/train_steps_since_last_val_step
+                        value_optimizer.zero_grad()
+                        value_loss.backward()
+                        value_optimizer.step()
 
-                avg_train_loss = avg_train_policy_loss + avg_train_value_loss
+                        tot_train_value_loss += value_loss.detach()
+                        avg_train_value_loss = tot_train_value_loss/train_steps_since_last_val_step
+                    
+                    avg_train_loss = avg_train_policy_loss + avg_train_value_loss
 
-                if i % 100 == 0:
-                    with torch.no_grad():
-                        if not policy_done:
-                            prob_preds = self.policy_net(obss_val)
-                            avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
+                    if i % 100 == 0:
+                        with torch.no_grad():
+                            if not policy_done:
+                                sum_of_avg_val_policy_loss = 0
+                                for val_chunk in val_loader:
+                                    obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                                    prob_preds = self.policy_net(obss_val)
+                                    sum_of_avg_val_policy_loss += self.policy_net.loss(prob_preds, probs_val)
+                                    avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
+                                    
+                                avg_val_policy_loss = sum_of_avg_val_policy_loss / len(val_loader)
 
-                        if not value_done:
-                            value_preds = self.value_net(obss_val)
-                            avg_val_value_loss = self.value_net.loss(value_preds, values_val)
+                            if not value_done:
+                                sum_of_avg_val_value_loss = 0
+                                for val_chunk in val_loader:
+                                    obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                                    value_preds = self.value_net(obss_val)
+                                    sum_of_avg_val_value_loss += self.value_net.loss(value_preds, values_val)
+                                avg_val_value_loss = sum_of_avg_val_value_loss / len(val_loader)
+                            
+                            avg_val_loss = avg_val_policy_loss + avg_val_value_loss
 
-                        avg_val_loss = avg_val_policy_loss + avg_val_value_loss
+                            print(f"e: {epoch} {round(n_rows_trained_on_in_epoch/n_rows_in_train_loader * 100)}% | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}", end="\r")
+                            mlflow.log_metric("epoch", epoch, step=i)
+                            mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=i)
+                            mlflow.log_metric("train_value_loss", avg_train_value_loss, step=i)
+                            mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=i)
+                            mlflow.log_metric("val_value_loss", avg_val_value_loss, step=i)
+                            mlflow.log_metric("train_loss", avg_train_loss, step=i)
+                            mlflow.log_metric("val_loss", avg_val_loss, step=i)
+                            tot_train_policy_loss = 0
+                            tot_train_value_loss = 0
+                            train_steps_since_last_val_step = 0
 
-                        print(f"e: {epoch} {round(i/n_batches * 100)}% | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}", end="\r")
-                        mlflow.log_metric("epoch", epoch, step=i)
-                        mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=i)
-                        mlflow.log_metric("train_value_loss", avg_train_value_loss, step=i)
-                        mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=i)
-                        mlflow.log_metric("val_value_loss", avg_val_value_loss, step=i)
-                        mlflow.log_metric("train_loss", avg_train_loss, step=i)
-                        mlflow.log_metric("val_loss", avg_val_loss, step=i)
-                        tot_train_policy_loss = 0
-                        tot_train_value_loss = 0
-                        train_steps_since_last_val_step = 0
-            
-            if policy_done and value_done:
-                break
+                if policy_done and value_done:
+                    break
 
-        self.policy_net.load_state_dict(policy_early_stopping.best_params)
-        self.value_net.load_state_dict(value_early_stopping.best_params)
+            self.policy_net.load_state_dict(policy_early_stopping.best_params)
+            self.value_net.load_state_dict(value_early_stopping.best_params)
 
-        print(f"e: {epoch} | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}")
-        print("training done")
-        return train_buffer, val_buffer, avg_train_loss, avg_val_loss
+            print(f"e: {epoch} | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}")
+            print("training done")
+        return avg_train_loss, avg_val_loss
 
     def save(self, folder):
         os.mkdir(folder)
@@ -569,10 +779,10 @@ class PVNet:
 class MCTSAgent:
     def __init__(
             self,
-            env,
-            num_mcts_sims,
-            c_puct,
-            pvnet,
+            env: GymMachiKoro,
+            num_mcts_sims: int,
+            c_puct: float,
+            pvnet: PVNet,
             dirichlet_to_root_node = True,
             thinking_time: int = None,
             print_info: bool = False,
@@ -608,9 +818,6 @@ class MCTSAgent:
         return self.mcts.pvnet.train(buffer, batch_size)
     
 if __name__ == "__main__":
-    import pickle
-    from env import GymMachiKoro, MachiKoro
-
     pvnet = torch.load("checkpoints2/4.pt")
     with open(f"checkpoints2/4.pkl", "rb") as file:
         buffer = pickle.load(file)

@@ -31,7 +31,7 @@
             "name": "Machi Koro Self Play",
             "type": "python",
             "request": "launch",
-            "program": "/Users/jordydikkers/personal/projects/machi-koro-ai/self_play_machi_koro.py",
+            "program": "/Users/jordydikkers/Documents/repos/machi-koro-ai/self_play_machi_koro.py",
             "console": "integratedTerminal",
         },
     ]

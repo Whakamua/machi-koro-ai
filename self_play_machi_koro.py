@@ -1,6 +1,6 @@
 from env_machi_koro_2 import GymMachiKoro2
 from mcts_agent import MCTSAgent
-from buffer import Buffer, BigBuffer
+from buffer import Buffer
 import numpy as np
 import torch
 import os
@@ -17,6 +17,8 @@ from multielo import MultiElo
 import datetime
 import copy
 import mlflow
+import h5py
+from mcts_agent import NotEnoughDataError
 
 def seed_all(seed):
     random.seed(seed)
@@ -100,17 +102,18 @@ class MCTSActor:
             if done:
                 if buffer is not None:
                     buffer.compute_values()
-                    time_taken = time.time() - t00
-                    winner = agents[info["winning_player_index"]]["name"]
-                    # del env
-                    # del agents
+                time_taken = time.time() - t00
+                winner = agents[info["winning_player_index"]]["name"]
                 return buffer, time_taken, game_id, winner
 
             if buffer is not None and buffer.isfull:
-                buffer.compute_values()
+                if done:
+                    buffer.compute_values()
+                    winning_player_index = info["winning_player_index"]
+                    winner = agents[winning_player_index]["name"] if winning_player_index is not None else None
+                else:
+                    winner = None
                 time_taken = time.time() - t00
-                winning_player_index = info["winning_player_index"]
-                winner = agents[winning_player_index]["name"] if winning_player_index is not None else None
                 # del env
                 # del agents
                 return buffer, time_taken, game_id, winner
@@ -217,12 +220,11 @@ class Pit:
             print(f"{agent} | elo: {info['elo']} | wins: {info['wins']}")
 
 def main():
-
     MCTS_SIMULATIONS = 100
     PUCT = 2
     PVNET_TRAIN_EPOCHS = 30
     BATCH_SIZE = 64
-    GAMES_PER_ITERATION = 1000
+    GAMES_PER_ITERATION = 200
     # CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
     CARD_INFO_PATH = "card_info_machi_koro_2_quick_game.yaml"
     TRAIN_VAL_SPLIT = 0.2
@@ -267,15 +269,12 @@ def main():
     # GAME_START_STATE[temp_env.observation_indices["marketplace"]["1-6"]["pos_0"]["count"]] = 2
     # env.reset(GAME_START_STATE)
 
-
-    observation_space = env.observation_space
-    action_space = env.action_space
-    pvnet_for_training = PVNet(env)
-    agent = MCTSAgent(
+    current_agent = MCTSAgent(
         env=env,
         num_mcts_sims=MCTS_SIMULATIONS,
         c_puct=PUCT,
-        pvnet=pvnet_for_training
+        pvnet=PVNet(env),
+        dirichlet_to_root_node=True,
     )
     if use_ray:
         n_workers = int(ray.available_resources()["CPU"] - 1)
@@ -295,24 +294,35 @@ def main():
     checkpoint_dir = "checkpoints/" + str(datetime.datetime.now())
     os.makedirs(checkpoint_dir)
 
-    best_agent = copy.deepcopy(agent)
+    # the best agent is considered the randomly initialized agent at the start
+    best_agent = copy.deepcopy(current_agent)
     best_agent_name = "init_random_agent"
     pit.add_initial_agent(best_agent_name, best_agent)
+
+    # the current agent is initially random as well
     current_agent_name = "agent_0"
     training_agents = {
-            0: {"name": current_agent_name, "agent": agent},
+            0: {"name": current_agent_name, "agent": current_agent},
             1: {"name": best_agent_name, "agent": best_agent},
         }
     assert len(training_agents) == N_PLAYERS, "number of agents should be equal to number of players"
 
-    buffers = []
-    newest_buffers = []
-    steps_collected = 0
+    steps_collected_for_next_training_run = 0
+    completed_games_for_next_training_run = 0
     iterations_since_new_best_agent = 0
     number_of_agent_updates = 0
-    for i in range(1):
+    buffer_path=f"{checkpoint_dir}/buffers.h5"
+    subset_rules = {}
+    with h5py.File(buffer_path, "w") as h5f:
+        h5f.create_group("train")
+        h5f.create_group("val")
+    completed_games_per_iteration = {"val": {}, "train": {}}
+    steps_collected_per_iteration = {"val": {}, "train": {}}
+
+    for i in range(100):
+        
         print("##################################################################################")
-        print(f"iteration {i} | agent_updates: {number_of_agent_updates} | buffers_collected | {len(buffers)} steps_collected: {steps_collected}")
+        print(f"iteration {i} | agent_updates: {number_of_agent_updates} | completed_games_for_next_training_run | {completed_games_for_next_training_run} steps_collected_for_next_training_run: {steps_collected_for_next_training_run}")
         print("##################################################################################")
         t1 = time.time()
 
@@ -338,100 +348,93 @@ def main():
         else:
             actor_generator = (actor.play_game(v, env, GAME_START_STATE, training_agents, buffer) for v in game_ids)
 
-        steps_collected = 0
         games_played = 0
         time_now = time.time()
 
         wins = {agent["name"]: 0 for agent in training_agents.values()}
-        for filled_buffer, game_time_taken, game_id, winner in actor_generator:
-            games_played += 1
-            # print(f"game {game_id} took {time_taken} sec to complete", end="\r" if games_played < len(game_ids) else "\n")
-            time_taken = time.time() - time_now
-            estimated_time_left = time_taken / games_played * (GAMES_PER_ITERATION - games_played)
-            steps_collected += filled_buffer.size
-            pre_append = time.time()
+        completed_games_per_iteration["train"][f"iteration_{i}"] = 0
+        completed_games_per_iteration["val"][f"iteration_{i}"] = 0
+        steps_collected_per_iteration["train"][f"iteration_{i}"] = 0
+        steps_collected_per_iteration["val"][f"iteration_{i}"] = 0
 
-            if winner is None:
-                print(f"WARNING: [SelfPlay] game {game_id} had no winner")
-                continue
-            else:
-                newest_buffers.append(filled_buffer)
-                wins[winner] += 1
+        with h5py.File(buffer_path, "a") as h5f:
+            h5f_train_it = h5f["train"].create_group(f"iteration_{i}")
+            h5f_val_it = h5f["val"].create_group(f"iteration_{i}")
+            
+            for filled_buffer, game_time_taken, game_id, winner in actor_generator:
+                if "columns" not in h5f.attrs:
+                    h5f.attrs["columns"] = list(filled_buffer.flattened_column_names_and_types_dict.keys())
 
-            print(f"game {games_played}/{len(game_ids)}, estimated seconds left: {round(estimated_time_left)}, latest game took {game_time_taken}s to complete, appending buffer took {time.time() - pre_append}", end="\r" if games_played < len(game_ids) else "\n")
+                games_played += 1
+                time_taken = time.time() - time_now
+                estimated_time_left = time_taken / games_played * (GAMES_PER_ITERATION - games_played)
 
+                pre_append = time.time()
+
+                if winner is None:
+                    print(f"WARNING: [SelfPlay] game {game_id} had no winner")
+                    continue
+                else:
+                    wins[winner] += 1
+                    buffer_np = filled_buffer.export_flattened()
+                    if completed_games_per_iteration["train"][f"iteration_{i}"] % (int(1/TRAIN_VAL_SPLIT)-1) == 0:
+                        h5f_val_it.create_dataset(f"game_{game_id}", data=buffer_np)
+                        completed_games_per_iteration["val"][f"iteration_{i}"] += 1
+                        steps_collected_per_iteration["val"][f"iteration_{i}"] += filled_buffer.size
+                    else:
+                        completed_games_per_iteration["train"][f"iteration_{i}"] += 1
+                        steps_collected_per_iteration["train"][f"iteration_{i}"] += filled_buffer.size
+                        h5f_train_it.create_dataset(f"game_{game_id}", data=buffer_np)
+                print(f"game {games_played}/{len(game_ids)}, estimated seconds left: {round(estimated_time_left)}, latest game took {game_time_taken}s to complete, appending buffer took {time.time() - pre_append}", end="\r" if games_played < len(game_ids) else "\n")
         print(f"It: {i} | wins: {wins} time: {time.time() - t1}")
 
-        # current_agent_win_ratio = wins[current_agent_name] / (wins[current_agent_name] + wins[best_agent_name])
-        # if current_agent_win_ratio > 0.55 and iterations_since_new_best_agent > 0:
-        #     print(f"new best agent found in iteration {i}, win ratio: {current_agent_win_ratio}")
-        #     print("computing elo ratings")
-        #     pit.add_agent_and_compute_ratings(copy.deepcopy(agent), f"agent_{i}", start_state=GAME_START_STATE)
-        #     pit.print_rankings()
-        #     best_agent = copy.deepcopy(agent)
-        #     # resetting buffers
-        #     buffers = newest_buffers
-        #     newest_buffers = []
-        #     iterations_since_new_best_agent = 0
-        #     number_of_agent_updates += 1
-        # else:
-        #     print(f"current agent win ratio: {current_agent_win_ratio}")
+        subset_rules[f"iteration_{i}"] = 1.0
 
-        #     buffers = buffers + newest_buffers
-        #     newest_buffers = []
+        if completed_games_per_iteration["val"][f"iteration_{i}"] + completed_games_per_iteration["train"][f"iteration_{i}"] == 0:
+            print(f"completed games this iteration is 0 pitting is not possible, skipping pitting computation and model trainig")
+            continue
 
-        # big_buffer = BigBuffer(
-        #     observation_space=observation_space,
-        #     action_space=action_space
-        # )
-        # big_buffer.combine_buffers(buffers)
-
-        # with open(f"{checkpoint_dir}/buffer_{i}.pkl", "wb") as file:
-        #     pickle.dump(big_buffer, file)
-
-        # with mlflow.start_run() as run:
-        #     pvnet_for_training.train(
-        #         buffer=big_buffer,
-        #         batch_size=BATCH_SIZE,
-        #         epochs=PVNET_TRAIN_EPOCHS,
-        #         train_val_split=TRAIN_VAL_SPLIT,
-        #         lr=LR,
-        #         weight_decay=WEIGHT_DECAY,
-        #         reset_weights=True,
-        #     )
-        # pvnet_for_training.save(f"{checkpoint_dir}/model_{i}")
-        # iterations_since_new_best_agent += 1
-
-
-
-        # if new_best_agent:
-        #     best_agent = copy.deepcopy(agent)
-        #     # resetting buffer
-        #     big_buffer = BigBuffer(
-        #         observation_space=observation_space,
-        #         action_space=action_space
-        #     )
-        # else:
-        #     big_buffer.combine_buffers([big_buffer] + buffers)
-
-        #     with open(f"{checkpoint_dir}/buffer_{i}.pkl", "wb") as file:
-        #         pickle.dump(big_buffer, file)
-
-        #     with mlflow.start_run() as run:
-        #         pvnet_for_training.train(
-        #             buffer=buffer,
-        #             batch_size=BATCH_SIZE,
-        #             epochs=PVNET_TRAIN_EPOCHS,
-        #             train_val_split=TRAIN_VAL_SPLIT,
-        #             lr=LR,
-        #             weight_decay=WEIGHT_DECAY,
-        #         )
-        #     pvnet_for_training.save(f"{checkpoint_dir}/model_{i}")
+        current_agent_win_ratio = wins[current_agent_name] / (wins[current_agent_name] + wins[best_agent_name])
+        if current_agent_win_ratio > 0.55 and iterations_since_new_best_agent > 0:
+            print(f"new best agent found in iteration {i}, win ratio: {current_agent_win_ratio}")
+            print("computing elo ratings")
+            pit.add_agent_and_compute_ratings(copy.deepcopy(current_agent), f"agent_{i}", start_state=GAME_START_STATE)
+            pit.print_rankings()
+            best_agent = copy.deepcopy(current_agent)
+            best_agent_name = copy.deepcopy(current_agent_name)
+            training_agents[1] = {"name": best_agent_name, "agent": best_agent}
+            iterations_since_new_best_agent = 0
+            number_of_agent_updates += 1
+            for iteration in subset_rules.keys():
+                subset_rules[iteration] = 0.0
+            subset_rules[f"iteration_{i}"] = 1.0
+        else:
+            print(f"current agent win ratio: {current_agent_win_ratio}")
+        
+        try:
+            with mlflow.start_run() as run:
+                current_agent.mcts.pvnet.train_hdf5(
+                    batch_size=BATCH_SIZE,
+                    epochs=PVNET_TRAIN_EPOCHS,
+                    train_val_split=TRAIN_VAL_SPLIT,
+                    lr=LR,
+                    weight_decay=WEIGHT_DECAY,
+                    hdf5_file_path=buffer_path,
+                    subset_rules=subset_rules,
+                    reset_weights=True,
+                )
+            current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}.pt")
+            current_agent_name = f"agent_{i}"
+            training_agents[0] = {"name": current_agent_name, "agent": current_agent}
+        except NotEnoughDataError:
+            print("Not enough data to train model, skipping training")
+            current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}_same_as_before_due_to_not_enough_data.pt") 
+        iterations_since_new_best_agent += 1
 
 
 if __name__ == "__main__":
-    profiler = cProfile.Profile()
-    profiler.enable()
+    # profiler = cProfile.Profile()
+    # profiler.enable()
     main()
-    profiler.disable()
-    profiler.dump_stats("self_play.prof")
+    # profiler.disable()
+    # profiler.dump_stats("self_play.prof")

@@ -1,21 +1,59 @@
 import numpy as np
 from gym.spaces import flatten, flatten_space, Discrete, MultiBinary
-import random
-import copy
+import polars as pl
+
+class NoWinnerException(Exception):
+    pass
 
 class Buffer:
-    def __init__(self, observation_space, action_space, capacity: int | None = None):
+    def __init__(self, observation_space, action_space, capacity: int = 0):
         assert isinstance(action_space, Discrete), "other action spaces are not supported due to the reset method assuming a dimension of 1" 
         assert isinstance(observation_space, MultiBinary)
         self._observation_space = observation_space
         self._action_space = action_space
         self._capacity = capacity
         self._size = 0
-        if self._capacity is not None:
-            self.reset(self._capacity)
 
-    def get_big_buffer(self):
-        return BigBuffer(self._observation_space, self._action_space)
+        self.reset(self._capacity)
+
+        self._obs_col_names = ["obs" + str(i) for i in range(self._obss.shape[1])]
+        self._action_col_names = ["action"]
+        self._reward_col_names = ["reward"]
+        self._next_obs_col_names = ["next_obs" + str(i) for i in range(self._next_obss.shape[1])]
+        self._done_col_names = ["done"]
+        self._player_id_col_names = ["player_id"]
+        self._action_mask_col_names = ["action_mask" + str(i) for i in range(self._action_masks.shape[1])]
+        self._value_col_names = ["value"]
+        self._value_pred_col_names = ["value_pred"]
+        self._value_mcts_col_names = ["value_mcts"]
+        self._prob_col_names = ["prob" + str(i) for i in range(self._probs.shape[1])]
+        self._winner_col_names = ["winner"]
+
+        self._flattened_column_names_and_types_dict = {
+            obs_col_name: pl.Int16 for obs_col_name in self._obs_col_names
+        } | {
+            action_col_name: pl.UInt8 for action_col_name in self._action_col_names
+        } | {
+            reward_col_name: pl.Int8 for reward_col_name in self._reward_col_names
+        } | {
+            next_obs_col_name: pl.Int16 for next_obs_col_name in self._next_obs_col_names
+        } | {
+            done_col_name: pl.Boolean for done_col_name in self._done_col_names
+        } | {
+            player_id_col_name: pl.UInt8 for player_id_col_name in self._player_id_col_names
+        } | {
+            action_mask_col_name: pl.Boolean for action_mask_col_name in self._action_mask_col_names
+        } | {
+            value_col_name: pl.Float32 for value_col_name in self._value_col_names
+        } | {
+            value_pred_col_name: pl.Float32 for value_pred_col_name in self._value_pred_col_names
+        } | {
+            value_mcts_col_name: pl.Float32 for value_mcts_col_name in self._value_mcts_col_names
+        } | {
+            prob_col_name: pl.Float32 for prob_col_name in self._prob_col_names
+        } | {
+            winner_col_name: pl.UInt8 for winner_col_name in self._winner_col_names
+        }
 
     @property
     def action_space(self):
@@ -96,13 +134,47 @@ class Buffer:
         self._value_preds = np.zeros((capacity, 1))
         self._values_mcts = np.zeros((capacity, 1))
         self._probs = np.zeros((capacity, self._action_space.n))
-        self._episode_starts = {}
-        self._episode_ends = {}
-        self._episode_lengths = {}
-        self._episode_number = 0
-        self._new_episode = True
 
         self.values_computed = False
+        
+        
+    @property
+    def flattened_column_names_and_types_dict(self):
+        return self._flattened_column_names_and_types_dict
+
+    def export_flattened(self):
+        if not self.values_computed:
+            self.compute_values()
+
+        return np.concatenate([
+            self._obss[:self._size],
+            self._actions[:self._size],
+            self._rewards[:self._size],
+            self._next_obss[:self._size],
+            self._dones[:self._size],
+            self._player_ids[:self._size],
+            self._action_masks[:self._size],
+            self._values[:self._size],
+            self._value_preds[:self._size],
+            self._values_mcts[:self._size],
+            self._probs[:self._size],
+        ], axis=1)
+
+    def import_flattened(self, flattened):
+        self._obss = flattened[self._obs_col_names].to_numpy()
+        self._actions = flattened[self._action_col_names].to_numpy()
+        self._rewards = flattened[self._reward_col_names].to_numpy()
+        self._next_obss = flattened[self._next_obs_col_names].to_numpy()
+        self._dones = flattened[self._done_col_names].to_numpy()
+        self._player_ids = flattened[self._player_id_col_names].to_numpy()
+        self._action_masks = flattened[self._action_mask_col_names].to_numpy()
+        self._values = flattened[self._value_col_names].to_numpy()
+        self._value_preds = flattened[self._value_pred_col_names].to_numpy()
+        self._values_mcts = flattened[self._value_mcts_col_names].to_numpy()
+        self._probs = flattened[self._prob_col_names].to_numpy()
+        self._size = len(flattened)
+        self._capacity = self._size
+        self.values_computed = True
 
     def add(self, obs, action, reward, next_obs, done, probs, current_player_index, action_mask, value_pred, value_mcts):
         assert self._size < self._capacity
@@ -121,47 +193,16 @@ class Buffer:
             probs,
         )
         self.values_computed = False
-        if self._new_episode:
-            self._episode_starts[self._episode_number] = self.size
-            self._new_episode = False
-            self._episode_ends[self._episode_number] = None
-            self._episode_lengths[self._episode_number] = 0
-
-        self._episode_ends[self._episode_number] = self.size
-        self._episode_lengths[self._episode_number] += 1
         
         self._size += 1
 
-        if done:
-            self._episode_number += 1
-            self._new_episode = True
-
     def compute_values(self):
-        # winning_player = None
-        # self._size = len(self._obss)
+        if self._dones[self._size-1] != 1:
+            raise NoWinnerException("No winner has been determined yet")
 
-        # self._values = np.zeros((self._size,1))
-        # for i in reversed(range(self._size)):
-        #     if self._dones[i]:
-        #         last_terminal_idx = i
-        #         break
-
-        # for i in range(last_terminal_idx, -1, -1):
-        #     if self._dones[i]:
-        #         winning_player = self._player_ids[i]
-        #     else:
-        #         self._values[i] = 1 if self._player_ids[i] == winning_player else -1
-        #         # self._values[i] = self._rewards[i] + self._gamma*self._values[i+1]
-        for episode, length in self._episode_lengths.items():
-            start_index = self._episode_starts[episode]
-            end_index = self._episode_ends[episode]
-            if self._dones[end_index]:
-                winner = self._player_ids[end_index]
-                for i in range(end_index, start_index - 1, -1):
-                    if i == end_index:
-                        self._values[i] = 0
-                    else:
-                        self._values[i] = 1 if self._player_ids[i] == winner else -1
+        winner = self._player_ids[self._size-1]
+        for i in range(self._size-1, -1, -1):
+            self._values[i] = 1 if self._player_ids[i] == winner else -1
         self.values_computed = True
 
     def __getitem__(self, indices):
@@ -192,127 +233,6 @@ class Buffer:
         self._values_mcts[indices] = items[9]
         self._probs[indices] = items[10]
 
-    def sample(self, batch_size, exclude_terminal_states=False):
-        if exclude_terminal_states:
-            batch_indices = np.random.choice(np.arange(self.size)[~self.dones[:,0].astype(bool)], size=batch_size, replace=False)
-        else:
-            batch_indices = np.random.randint(low=0, high=self._size, size=batch_size, dtype=int)
+    def sample(self, batch_size):
+        batch_indices = np.random.randint(low=0, high=self._size, size=batch_size, dtype=int)
         return self[batch_indices]
-
-    def get_random_batch_indices(self, batch_size, exclude_terminal_states=False):
-        assert batch_size <= self._size
-        if exclude_terminal_states:
-            indices = np.arange(self.size)[~self.dones[:,0].astype(bool)]
-        else:
-            indices = np.arange(self.size)
-        np.random.shuffle(indices)
-        n_batches = int(self._size / batch_size)
-        return np.array_split(indices, n_batches)
-
-    def get_random_batches(self, batch_size, exclude_terminal_states=False):
-        batches = self.get_random_batch_indices(batch_size, exclude_terminal_states=exclude_terminal_states)
-        return [self[_indices] for _indices in batches]
-
-    def get_episode_indices(self, episode_number: int):
-        return list(range(self._episode_starts[episode_number], self._episode_ends[episode_number] + 1))
-
-    def get_episode(self, episode_number: int):
-        return self[self.get_episode_indices(episode_number)]
-
-    def keep_indices(self, indices):
-        self._obss = self._obss[indices]
-        self._actions = self._actions[indices]
-        self._rewards = self._rewards[indices]
-        self._next_obss = self._next_obss[indices]
-        self._dones = self._dones[indices]
-        self._player_ids = self._player_ids[indices]
-        self._action_masks = self._action_masks[indices]
-        self._values = self._values[indices]
-        self._value_preds = self._value_preds[indices]
-        self._values_mcts = self._values_mcts[indices]
-        self._probs = self._probs[indices]
-        self._size = len(indices)
-
-
-    def keep_episodes(self, episodes):
-        indices_to_keep = []
-        new_episode_starts = {}
-        new_episode_ends = {}
-        new_episode_lengths = {}
-        new_size = 0
-
-        for i, episode in enumerate(episodes):
-            indices_to_keep.extend(range(self._episode_starts[episode], self._episode_ends[episode] + 1))
-            new_episode_starts[i] = new_size
-            new_episode_lengths[i] = self._episode_lengths[episode]
-            new_episode_ends[i] = new_episode_starts[i] + self._episode_lengths[episode] - 1
-            new_size += self._episode_lengths[episode]
-        
-        self.keep_indices(indices_to_keep)
-        self._episode_starts = new_episode_starts
-        self._episode_ends = new_episode_ends
-        self._episode_lengths = new_episode_lengths
-
-
-    def split_buffer_by_episode(self, split, shuffle=True):
-        episodes = list(self._episode_starts.keys())
-        if shuffle:
-            random.shuffle(episodes)
-        
-        split_index = int(len(episodes)*(1-split))
-        buffer_1_indices = episodes[:split_index]
-        buffer_2_indices = episodes[split_index:]
-
-        buffer_2 = copy.deepcopy(self)
-        buffer_2.keep_episodes(buffer_2_indices)
-    
-        buffer_1 = copy.deepcopy(self)
-        buffer_1.keep_episodes(buffer_1_indices)
-
-        return buffer_1, buffer_2
-
-
-    def split_buffer(self, split, shuffle=True):
-        indices = np.arange(self._size)
-
-        if shuffle:
-            np.random.shuffle(indices)#shuffles the buffer (random) ur wlcm
-        split_index = int(len(indices)*(1-split))
-        buffer_1_indices = indices[:split_index]
-        buffer_2_indices = indices[split_index:]
-
-        buffer_2 = copy.deepcopy(self)
-        buffer_2.keep_indices(buffer_2_indices)
-    
-        buffer_1 = copy.deepcopy(self)
-        buffer_1.keep_indices(buffer_1_indices)
-
-        return buffer_1, buffer_2
-
-class BigBuffer(Buffer):
-    def __init__(self, observation_space, action_space):
-        super().__init__(observation_space, action_space, capacity=None)
-    def combine_buffers(self, buffers: list[Buffer]):
-        self._size = sum([buffer.size for buffer in buffers])
-        self._capacity = self._size
-        self.reset(capacity=self._capacity)
-
-        bigbuffer_start_index = 0
-        bigbuffer_end_index = -1
-        episode_number = 0
-
-        for buffer in buffers:
-            buffer.values_computed, "values must be computed before combining buffers"
-
-            for episode, episode_length in buffer._episode_lengths.items():
-                bigbuffer_start_index = bigbuffer_end_index + 1
-                bigbuffer_end_index += episode_length
-                self[bigbuffer_start_index:bigbuffer_end_index+1] = buffer.get_episode(episode)
-                
-                
-                self._episode_starts[episode_number] = bigbuffer_start_index
-                self._episode_ends[episode_number] = bigbuffer_end_index
-                self._episode_lengths[episode_number] = episode_length
-                episode_number += 1
-            del buffer
-        self.values_computed = True

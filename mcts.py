@@ -5,14 +5,24 @@ import numpy as np
 import copy
 import gym
 import time
-
+from env import GymMachiKoro
+import mcts_agent
 
 class MCTS():
     """
     This class handles the MCTS tree.
     """
 
-    def __init__(self, env, pvnet, num_mcts_sims, c_puct, dirichlet_for_root_node = True, thinking_time: int = None, print_info: bool = False):
+    def __init__(
+            self,
+            env: GymMachiKoro,
+            pvnet: mcts_agent.PVNet,
+            num_mcts_sims: int,
+            c_puct: float,
+            dirichlet_for_root_node: bool = True,
+            thinking_time: int = None,
+            print_info: bool = False
+        ):
         self.env = env
         self.pvnet = pvnet
         self.num_mcts_sims = num_mcts_sims
