@@ -8,6 +8,7 @@ import re
 import time
 import random
 import pickle
+import sys
 
 from mcts import MCTS
 import itertools
@@ -23,11 +24,70 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from env import GymMachiKoro, MachiKoro
 
+class TrainLogger:
+    def __init__(self):
+        self.first_call = True
+
+    def log(
+        self,
+        epoch: int,
+        steps: int,
+        avg_train_loss: float,
+        avg_val_loss: float,
+        avg_train_policy_loss: float,
+        avg_train_value_loss: float,
+        avg_val_policy_loss: float,
+        avg_val_value_loss: float,
+        policy_done: bool,
+        value_done: bool,
+    ):
+        # Cursor handling: Clear previous output if not the first call
+        if not self.first_call:
+            # Move cursor up 18 lines and clear each line
+            for _ in range(18):  # 18 is the number of lines printed
+                sys.stdout.write("\033[F\033[K")  # Move up and clear line
+        else:
+            self.first_call = False
+
+        # Log metrics to mlflow
+        mlflow.log_metric("epoch", epoch, step=steps)
+        mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=steps)
+        mlflow.log_metric("train_value_loss", avg_train_value_loss, step=steps)
+        mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=steps)
+        mlflow.log_metric("val_value_loss", avg_val_value_loss, step=steps)
+        mlflow.log_metric("train_loss", avg_train_loss, step=steps)
+        mlflow.log_metric("val_loss", avg_val_loss, step=steps)
+
+        # Print updated training information
+        sys.stdout.write("\n")
+        sys.stdout.write("############################################\n")
+        sys.stdout.write("Training PV-net:\n")
+        sys.stdout.write("############################################\n")
+        sys.stdout.write(f"Epoch: {epoch}\n")
+        sys.stdout.write("Policy:\n")
+        sys.stdout.write(f"  Train Loss: {avg_train_policy_loss:.4f}\n")
+        sys.stdout.write(f"  Val Loss: {avg_val_policy_loss:.4f}\n")
+        sys.stdout.write(f"  Completion: {'Done' if policy_done else 'In Progress'}\n")
+        sys.stdout.write("Value:\n")
+        sys.stdout.write(f"  Train Loss: {avg_train_value_loss:.4f}\n")
+        sys.stdout.write(f"  Val Loss: {avg_val_value_loss:.4f}\n")
+        sys.stdout.write(f"  Completion: {'Done' if value_done else 'In Progress'}\n")
+        sys.stdout.write("Total:\n")
+        sys.stdout.write(f"  Avg Val Loss: {avg_val_loss:.4f}\n")
+        sys.stdout.write(f"  Avg Train Loss: {avg_train_loss:.4f}\n")
+        sys.stdout.write("############################################\n")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
+
+
+
 class NotEnoughDataError(Exception):
     pass
 
 class HDF5DataLoader:
-    def __init__(self, file_path, subset_rules, train_split, chunk_size, num_workers=1):
+    def __init__(self, file_path, subset_rules, chunk_size, num_workers=1):
         """
         A class to handle HDF5 datasets and generate train and validation DataLoaders.
 
@@ -35,7 +95,6 @@ class HDF5DataLoader:
             file_path (str): Path to the HDF5 file.
             subset_rules (dict): Rules for selecting rows from iterations/buffers.
                                  Example: {1: 0.5, 2: 0.5, ..., 6: 1.0, 7: 1.0}
-            train_split (float): Fraction of data to use for training. Rest is for validation.
             chunk_size (int): Chunk size for DataLoaders.
             num_workers (int): Number of worker threads for DataLoader.
         """
@@ -323,12 +382,18 @@ class ValueNet(nn.Module):
 class PVNet:
     def __init__(
             self,
-            env,
+            env: GymMachiKoro,
             uniform_pvnet: bool = False,
             custom_policy_edit: bool = False,
             custom_value: bool = False,
             device: str = None,
+            mlflow_experiment_name: str = None,
     ):
+        self.mlflow_experiment_name = mlflow_experiment_name
+        if self.mlflow_experiment_name is not None:
+            mlflow.set_tracking_uri(uri="http://127.0.0.1:8080")
+            mlflow.set_experiment(mlflow_experiment_name)
+
         self.env = env
         self.use_uniform_pvnet = uniform_pvnet
         self.use_custom_policy_edit = custom_policy_edit
@@ -469,6 +534,37 @@ class PVNet:
         obss, values, probs = obss.to(self.device), values.to(self.device), probs.to(self.device)
         return obss, values, probs
 
+    def print_training_update(
+            self,
+            epoch: int,
+            avg_train_loss: float,
+            avg_val_loss: float,
+            avg_train_policy_loss: float,
+            avg_train_value_loss: float,
+            avg_val_policy_loss: float,
+            avg_val_value_loss: float,
+            policy_done: bool,
+            value_done: bool,
+    ):
+        # Clear previous output by moving up the lines
+        sys.stdout.write("\033[F" * 9)  # Adjust based on the number of lines printed
+
+        # Print updated training information
+        sys.stdout.write(f"Epoch: {epoch}\n")
+        sys.stdout.write("Training:\n")
+        sys.stdout.write(f"  Avg Train Loss: {avg_train_loss:.4f}\n")
+        sys.stdout.write(f"  Policy Loss: {avg_train_policy_loss:.4f}\n")
+        sys.stdout.write(f"  Value Loss: {avg_train_value_loss:.4f}\n")
+        sys.stdout.write("Validation:\n")
+        sys.stdout.write(f"  Avg Val Loss: {avg_val_loss:.4f}\n")
+        sys.stdout.write(f"  Policy Loss: {avg_val_policy_loss:.4f}\n")
+        sys.stdout.write(f"  Value Loss: {avg_val_value_loss:.4f}\n")
+        sys.stdout.write(f"Completion: Policy {'Done' if policy_done else 'In Progress'}, "
+                        f"Value {'Done' if value_done else 'In Progress'}\n")
+        sys.stdout.flush()
+
+
+
     def train_hdf5(
         self,
         batch_size: int,
@@ -486,7 +582,6 @@ class PVNet:
             data_manager = HDF5DataLoader(
                 file_path=hdf5_file_path,
                 subset_rules=subset_rules,
-                train_split=train_val_split,
                 chunk_size=int(64e4),
                 num_workers=1,
             )
@@ -510,128 +605,125 @@ class PVNet:
 
         policy_done = False
         value_done = False
-
-        for epoch in range(epochs):
-            time_n = time.time()
-            with torch.no_grad():
-                if not policy_done:
-                    sum_of_avg_val_policy_loss = 0
-                    time_val = time.time()
-                    for val_chunk in val_loader:
-                        print("time first val chunk", time.time()-time_val)
-                        obss_val, values_val, probs_val = self._process_chunk(val_chunk)
-                        prob_preds = self.policy_net(obss_val)
-                        sum_of_avg_val_policy_loss += self.policy_net.loss(prob_preds, probs_val)
-                        print("val chunk took", time.time()-time_val)
-                    
-                    avg_val_policy_loss = sum_of_avg_val_policy_loss / len(val_loader)
-
-                    if policy_early_stopping.update(avg_val_policy_loss, epoch, self.policy_net.state_dict()):
-                        policy_done = True
-
-                if not value_done:
-                    sum_of_avg_val_value_loss = 0
-                    for val_chunk in val_loader:
-                        obss_val, values_val, probs_val = self._process_chunk(val_chunk)
-                        value_preds = self.value_net(obss_val)
-                        sum_of_avg_val_value_loss += self.value_net.loss(value_preds, values_val)
-                    avg_val_value_loss = sum_of_avg_val_value_loss / len(val_loader)
-                    if value_early_stopping.update(avg_val_value_loss, epoch, self.value_net.state_dict()):
-                        value_done = True
-            
-            if policy_done and value_done:
-                break
-            
-            print("early stopping eval took", time.time()-time_n)
-
-            train_loader.shuffle()
-            tot_train_policy_loss = 0
-            tot_train_value_loss = 0
-            train_steps_since_last_val_step = 0
-            time_pre_first_train_chunk = time.time()
-            n_rows_in_train_loader = train_loader.tot_rows
-            n_rows_trained_on_in_epoch = 0
-            for train_chunk in train_loader:
-                print("time first train chunk", time.time()-time_pre_first_train_chunk)
-                time_train = time.time()
-                obss_train, values_train, probs_train = self._process_chunk(train_chunk)
-
-                def split_array(arr, chunk_size):
-                    return [arr[i:i + chunk_size] for i in range(0, len(arr), chunk_size)]
-
-                indices_for_all_batches = split_array(np.arange(obss_train.shape[0]), batch_size)
-                
-                # np.array_split(np.arange(obss_train.shape[0]), math.ceil(obss_train.shape[0] / batch_size)) 
-                for i, batch_indices in enumerate(indices_for_all_batches):
-                    n_rows_trained_on_in_epoch += len(batch_indices)
-                    train_steps_since_last_val_step += 1
-
+        
+        with mlflow.start_run() as run:
+            train_logger = TrainLogger()
+            for epoch in range(epochs):
+                with torch.no_grad():
                     if not policy_done:
-                        prob_preds = self.policy_net(obss_train[batch_indices])
-                        policy_loss = self.policy_net.loss(prob_preds, probs_train[batch_indices])
+                        sum_of_avg_val_policy_loss = 0
+                        time_val = time.time()
+                        for val_chunk in val_loader:
+                            obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                            prob_preds = self.policy_net(obss_val)
+                            sum_of_avg_val_policy_loss += self.policy_net.loss(prob_preds, probs_val)
+                        
+                        avg_val_policy_loss = sum_of_avg_val_policy_loss / len(val_loader)
 
-                        policy_optimizer.zero_grad()
-                        policy_loss.backward()
-                        policy_optimizer.step()
+                        if policy_early_stopping.update(avg_val_policy_loss, epoch, self.policy_net.state_dict()):
+                            policy_done = True
 
-                        tot_train_policy_loss += policy_loss.detach()
-                        avg_train_policy_loss = tot_train_policy_loss/train_steps_since_last_val_step
-                    
                     if not value_done:
-                        value_preds = self.value_net(obss_train[batch_indices])
-                        value_loss = self.value_net.loss(value_preds, values_train[batch_indices])
-
-                        value_optimizer.zero_grad()
-                        value_loss.backward()
-                        value_optimizer.step()
-
-                        tot_train_value_loss += value_loss.detach()
-                        avg_train_value_loss = tot_train_value_loss/train_steps_since_last_val_step
-                    
-                    avg_train_loss = avg_train_policy_loss + avg_train_value_loss
-
-                    if i % 100 == 0:
-                        with torch.no_grad():
-                            if not policy_done:
-                                sum_of_avg_val_policy_loss = 0
-                                for val_chunk in val_loader:
-                                    obss_val, values_val, probs_val = self._process_chunk(val_chunk)
-                                    prob_preds = self.policy_net(obss_val)
-                                    sum_of_avg_val_policy_loss += self.policy_net.loss(prob_preds, probs_val)
-                                    avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
-                                    
-                                avg_val_policy_loss = sum_of_avg_val_policy_loss / len(val_loader)
-
-                            if not value_done:
-                                sum_of_avg_val_value_loss = 0
-                                for val_chunk in val_loader:
-                                    obss_val, values_val, probs_val = self._process_chunk(val_chunk)
-                                    value_preds = self.value_net(obss_val)
-                                    sum_of_avg_val_value_loss += self.value_net.loss(value_preds, values_val)
-                                avg_val_value_loss = sum_of_avg_val_value_loss / len(val_loader)
-                            
-                            avg_val_loss = avg_val_policy_loss + avg_val_value_loss
-
-                            print(f"e: {epoch} {round(n_rows_trained_on_in_epoch/n_rows_in_train_loader * 100)}% | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}", end="\r")
-                            mlflow.log_metric("epoch", epoch, step=i)
-                            mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=i)
-                            mlflow.log_metric("train_value_loss", avg_train_value_loss, step=i)
-                            mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=i)
-                            mlflow.log_metric("val_value_loss", avg_val_value_loss, step=i)
-                            mlflow.log_metric("train_loss", avg_train_loss, step=i)
-                            mlflow.log_metric("val_loss", avg_val_loss, step=i)
-                            tot_train_policy_loss = 0
-                            tot_train_value_loss = 0
-                            train_steps_since_last_val_step = 0
-
+                        sum_of_avg_val_value_loss = 0
+                        for val_chunk in val_loader:
+                            obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                            value_preds = self.value_net(obss_val)
+                            sum_of_avg_val_value_loss += self.value_net.loss(value_preds, values_val)
+                        avg_val_value_loss = sum_of_avg_val_value_loss / len(val_loader)
+                        if value_early_stopping.update(avg_val_value_loss, epoch, self.value_net.state_dict()):
+                            value_done = True
+                
                 if policy_done and value_done:
                     break
 
-            self.policy_net.load_state_dict(policy_early_stopping.best_params)
-            self.value_net.load_state_dict(value_early_stopping.best_params)
+                train_loader.shuffle()
+                tot_train_policy_loss = 0
+                tot_train_value_loss = 0
+                train_steps_since_last_val_step = 0
+                n_rows_in_train_loader = train_loader.tot_rows
+                n_rows_trained_on_in_epoch = 0
+                steps = 0
+                for train_chunk in train_loader:
+                    obss_train, values_train, probs_train = self._process_chunk(train_chunk)
 
-            print(f"e: {epoch} | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}")
-            print("training done")
+                    def split_array(arr, chunk_size):
+                        return [arr[i:i + chunk_size] for i in range(0, len(arr), chunk_size)]
+
+                    indices_for_all_batches = split_array(np.arange(obss_train.shape[0]), batch_size)
+                    
+                    # np.array_split(np.arange(obss_train.shape[0]), math.ceil(obss_train.shape[0] / batch_size)) 
+                    for i, batch_indices in enumerate(indices_for_all_batches):
+                        steps+=1
+                        n_rows_trained_on_in_epoch += len(batch_indices)
+                        train_steps_since_last_val_step += 1
+
+                        if not policy_done:
+                            prob_preds = self.policy_net(obss_train[batch_indices])
+                            policy_loss = self.policy_net.loss(prob_preds, probs_train[batch_indices])
+
+                            policy_optimizer.zero_grad()
+                            policy_loss.backward()
+                            policy_optimizer.step()
+
+                            tot_train_policy_loss += policy_loss.detach()
+                            avg_train_policy_loss = tot_train_policy_loss/train_steps_since_last_val_step
+                        
+                        if not value_done:
+                            value_preds = self.value_net(obss_train[batch_indices])
+                            value_loss = self.value_net.loss(value_preds, values_train[batch_indices])
+
+                            value_optimizer.zero_grad()
+                            value_loss.backward()
+                            value_optimizer.step()
+
+                            tot_train_value_loss += value_loss.detach()
+                            avg_train_value_loss = tot_train_value_loss/train_steps_since_last_val_step
+                        
+                        avg_train_loss = avg_train_policy_loss + avg_train_value_loss
+
+                        if i % 100 == 0:
+                            with torch.no_grad():
+                                if not policy_done:
+                                    sum_of_avg_val_policy_loss = 0
+                                    for val_chunk in val_loader:
+                                        obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                                        prob_preds = self.policy_net(obss_val)
+                                        sum_of_avg_val_policy_loss += self.policy_net.loss(prob_preds, probs_val)
+                                        avg_val_policy_loss = self.policy_net.loss(prob_preds, probs_val)
+                                        
+                                    avg_val_policy_loss = sum_of_avg_val_policy_loss / len(val_loader)
+
+                                if not value_done:
+                                    sum_of_avg_val_value_loss = 0
+                                    for val_chunk in val_loader:
+                                        obss_val, values_val, probs_val = self._process_chunk(val_chunk)
+                                        value_preds = self.value_net(obss_val)
+                                        sum_of_avg_val_value_loss += self.value_net.loss(value_preds, values_val)
+                                    avg_val_value_loss = sum_of_avg_val_value_loss / len(val_loader)
+                                
+                                avg_val_loss = avg_val_policy_loss + avg_val_value_loss
+
+                                train_logger.log(
+                                    epoch=epoch,
+                                    steps=steps,
+                                    avg_train_loss=avg_train_loss,
+                                    avg_val_loss=avg_val_loss,
+                                    avg_train_policy_loss=avg_train_policy_loss,
+                                    avg_train_value_loss=avg_train_value_loss,
+                                    avg_val_policy_loss=avg_val_policy_loss,
+                                    avg_val_value_loss=avg_val_value_loss,
+                                    policy_done=policy_done,
+                                    value_done=value_done,
+                                )
+                                tot_train_policy_loss = 0
+                                tot_train_value_loss = 0
+                                train_steps_since_last_val_step = 0
+
+        self.policy_net.load_state_dict(policy_early_stopping.best_params)
+        self.value_net.load_state_dict(value_early_stopping.best_params)
+
+        print(f"e: {epoch} | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}")
+        print("training done")
         return avg_train_loss, avg_val_loss
 
     def save(self, folder):

@@ -6,6 +6,7 @@ import torch
 import os
 import ray
 import pickle
+import sys
 import time
 import random, os
 from ray.util.actor_pool import ActorPool
@@ -16,9 +17,9 @@ from collections import OrderedDict
 from multielo import MultiElo
 import datetime
 import copy
-import mlflow
 import h5py
 from mcts_agent import NotEnoughDataError
+from collections import deque
 
 def seed_all(seed):
     random.seed(seed)
@@ -40,6 +41,143 @@ GAME_STATE_EMPTY_DECKS = np.array([ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  
        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
        -1, -1, -1, -1,  -1,  0, -1,  0,  -1,  0,  -1,  0, -1,  0, -1,  0, -1,
         0, -1,  0,  -1,  0, -1,  0, -1,  0, -1,  0,  0,  0])
+
+class SelfPlayLogger:
+    def __init__(self, buffer_log_path: str):
+        self.iteration = -1
+        self.steps_collected_per_iteration = {"val": {}, "train": {}}
+        self.completed_games_per_iteration = {"val": {}, "train": {}}
+        self.current_agents = None
+        self.buffer_log_path = buffer_log_path
+        self.number_of_agent_updates = 0
+
+    def __enter__(self):
+        self.h5f = h5py.File(self.buffer_log_path, "w")
+        self.h5f.create_group("train")
+        self.h5f.create_group("val")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.h5f.close()
+
+    def start_iteration(
+            self,
+            game_ids: int,
+            val_fraction,
+            subset_rules: dict[str, float],
+            agent_names: list[str],
+        ):
+        self.iteration += 1
+        self.new_iteration = True
+
+        # self.averge_time_left_estimate = deque(maxlen=10)
+        
+        assert len(subset_rules) == (self.iteration+1), "subset rules should be defined for each iteration"
+        self.subset_rules = subset_rules
+        self.iteration_start_time = time.time()
+        self.number_of_games_for_current_iteration = len(game_ids)
+        self.val_indices = np.random.choice(game_ids, int(len(game_ids) * (val_fraction)), replace=False)
+
+        self.games_played = {}
+        self.games_time_taken_deque = deque(maxlen=100)
+
+        self.steps_collected_per_iteration["train"][f"iteration_{self.iteration}"] = 0
+        self.steps_collected_per_iteration["val"][f"iteration_{self.iteration}"] = 0
+        self.completed_games_per_iteration["train"][f"iteration_{self.iteration}"] = 0
+        self.completed_games_per_iteration["val"][f"iteration_{self.iteration}"] = 0
+
+        self.h5f["train"].create_group(f"iteration_{self.iteration}")
+        self.h5f["val"].create_group(f"iteration_{self.iteration}")
+
+        self.wins_current_iteration = {agent_name: 0 for agent_name in agent_names}
+        self.games_with_no_winner_current_iteration = 0
+
+    def log_game(self, buffer, game_time_taken, game_id, winner):
+        self.games_played[game_id] = {"time_taken": game_time_taken, "winner": winner}
+
+        self.games_time_taken_deque.append(game_time_taken)
+
+        if "columns" not in self.h5f.attrs:
+            self.h5f.attrs["columns"] = list(buffer.flattened_column_names_and_types_dict.keys())
+
+        if winner is not None:
+            buffer_np = buffer.export_flattened()
+            self.wins_current_iteration[winner] += 1
+            if game_id in self.val_indices:
+                self.h5f["val"][f"iteration_{self.iteration}"].create_dataset(f"game_{game_id}", data=buffer_np)
+                self.completed_games_per_iteration["val"][f"iteration_{self.iteration}"] += 1
+                self.steps_collected_per_iteration["val"][f"iteration_{self.iteration}"] += buffer.size
+            else:
+                self.h5f["train"][f"iteration_{self.iteration}"].create_dataset(f"game_{game_id}", data=buffer_np)
+                self.completed_games_per_iteration["train"][f"iteration_{self.iteration}"] += 1
+                self.steps_collected_per_iteration["train"][f"iteration_{self.iteration}"] += buffer.size
+        else:
+            self.games_with_no_winner_current_iteration += 1
+
+        self.log()
+
+    def log_agent_update(self):
+        self.number_of_agent_updates += 1
+
+    @property
+    def completed_games_current_iteration(self):
+        return self.completed_games_per_iteration["train"][f"iteration_{self.iteration}"] + self.completed_games_per_iteration["val"][f"iteration_{self.iteration}"]
+
+    def log(
+        self,
+    ):
+        # Cursor handling: Clear previous output if not the first call
+        if not self.new_iteration:
+            # Move cursor up 13 lines and clear each line
+            for _ in range(13):  # 13 is the number of lines printed
+                sys.stdout.write("\033[F\033[K")  # Move up and clear line
+        else:
+            self.new_iteration = False
+        
+        avg_game_time = np.mean(self.games_time_taken_deque)
+        estimated_iteration_time_left = avg_game_time * (self.number_of_games_for_current_iteration - len(self.games_played))
+
+        train_games_for_next_training_run = int(
+            sum([
+                    self.completed_games_per_iteration["train"][iteration] * fraction
+                    for iteration, fraction in self.subset_rules.items()
+                ])
+        )
+        val_games_for_next_training_run = int(
+            sum([
+                    self.completed_games_per_iteration["val"][iteration] * fraction
+                    for iteration, fraction in self.subset_rules.items()
+                ])
+        )
+
+        train_steps_for_next_training_run = int(
+            sum([
+                    self.steps_collected_per_iteration["train"][iteration] * fraction
+                    for iteration, fraction in self.subset_rules.items()
+                ])
+        )
+        val_steps_for_next_training_run = int(
+            sum([
+                    self.steps_collected_per_iteration["val"][iteration] * fraction
+                    for iteration, fraction in self.subset_rules.items()
+                ])
+        )
+        # breakpoint()
+
+        sys.stdout.write("\n")
+        sys.stdout.write("##################################################################################\n")
+        sys.stdout.write(f"iteration {self.iteration}\n")
+        sys.stdout.write(f"agent_updates: {self.number_of_agent_updates}\n")
+        sys.stdout.write(f"games_played: {len(self.games_played)}/{self.number_of_games_for_current_iteration}\n")
+        sys.stdout.write(f"games_with_no_winner/completed_games: {self.games_with_no_winner_current_iteration}/{len(self.games_played)}\n")
+        sys.stdout.write(f"estimated_iteration_time_left: {estimated_iteration_time_left:.0f}s\n")
+        sys.stdout.write(f"last_game_time_taken: {self.games_time_taken_deque[-1]:.4f}s\n")
+        sys.stdout.write(f"wins: {self.wins_current_iteration}\n")
+        sys.stdout.write(f"next_training_run: {train_games_for_next_training_run} games, {train_steps_for_next_training_run} steps\n")
+        sys.stdout.write(f"next_validation_run: {val_games_for_next_training_run} games, {val_steps_for_next_training_run} steps\n")
+        sys.stdout.write("##################################################################################\n")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 class MCTSActor:
@@ -93,11 +231,6 @@ class MCTSActor:
                     value_pred=agents[current_player_index]["agent"].mcts.root.value_estimate,
                     value_mcts=agents[current_player_index]["agent"].mcts.root.value
                 )
-                
-            
-            # if steps % 10 == 0:
-            #     print(f"game_id {game_id} time for 10 steps: {time.time() - t0}")
-            #     t0 = time.time()
 
             if done:
                 if buffer is not None:
@@ -224,7 +357,7 @@ def main():
     PUCT = 2
     PVNET_TRAIN_EPOCHS = 30
     BATCH_SIZE = 64
-    GAMES_PER_ITERATION = 200
+    GAMES_PER_ITERATION = 2000
     # CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
     CARD_INFO_PATH = "card_info_machi_koro_2_quick_game.yaml"
     TRAIN_VAL_SPLIT = 0.2
@@ -240,9 +373,6 @@ def main():
     # breakpoint()
     if use_ray:
         ray.init()
-
-    mlflow.set_tracking_uri(uri="http://127.0.0.1:8080")
-    mlflow.set_experiment(f"Self Play {int(time.time())}")
 
     env_cls = GymMachiKoro2
     env_kwargs = {"n_players": N_PLAYERS, "card_info_path": CARD_INFO_PATH}
@@ -273,7 +403,7 @@ def main():
         env=env,
         num_mcts_sims=MCTS_SIMULATIONS,
         c_puct=PUCT,
-        pvnet=PVNet(env),
+        pvnet=PVNet(env, mlflow_experiment_name=f"Self Play {int(time.time())}"),
         dirichlet_to_root_node=True,
     )
     if use_ray:
@@ -307,129 +437,92 @@ def main():
         }
     assert len(training_agents) == N_PLAYERS, "number of agents should be equal to number of players"
 
-    steps_collected_for_next_training_run = 0
-    completed_games_for_next_training_run = 0
-    iterations_since_new_best_agent = 0
-    number_of_agent_updates = 0
-    buffer_path=f"{checkpoint_dir}/buffers.h5"
+    buffer_log_path=f"{checkpoint_dir}/buffers.h5"
     subset_rules = {}
-    with h5py.File(buffer_path, "w") as h5f:
-        h5f.create_group("train")
-        h5f.create_group("val")
-    completed_games_per_iteration = {"val": {}, "train": {}}
-    steps_collected_per_iteration = {"val": {}, "train": {}}
+    iterations_since_new_best_agent = 0
 
-    for i in range(100):
-        
-        print("##################################################################################")
-        print(f"iteration {i} | agent_updates: {number_of_agent_updates} | completed_games_for_next_training_run | {completed_games_for_next_training_run} steps_collected_for_next_training_run: {steps_collected_for_next_training_run}")
-        print("##################################################################################")
-        t1 = time.time()
-
-        buffer = Buffer(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            capacity=BUFFER_CAPACITY,
-        )
-
-        print("WARNING: USING VERY SIMPLE START STATE")
-        env.reset()
-        state = env.state_dict()
-        state["player_info"]["player 0"]["coins"] = 29
-        state["player_info"]["player 1"]["coins"] = 29
-        GAME_START_STATE = env.state_dict_to_array(state)
-
-        game_ids = np.arange(GAMES_PER_ITERATION)
-        if use_ray:
-            actor_generator = actor_pool.map_unordered(
-                lambda a, v: a.play_game.remote(v, env, GAME_START_STATE, training_agents, buffer),
-                game_ids,
-            )
-        else:
-            actor_generator = (actor.play_game(v, env, GAME_START_STATE, training_agents, buffer) for v in game_ids)
-
-        games_played = 0
-        time_now = time.time()
-
-        wins = {agent["name"]: 0 for agent in training_agents.values()}
-        completed_games_per_iteration["train"][f"iteration_{i}"] = 0
-        completed_games_per_iteration["val"][f"iteration_{i}"] = 0
-        steps_collected_per_iteration["train"][f"iteration_{i}"] = 0
-        steps_collected_per_iteration["val"][f"iteration_{i}"] = 0
-
-        with h5py.File(buffer_path, "a") as h5f:
-            h5f_train_it = h5f["train"].create_group(f"iteration_{i}")
-            h5f_val_it = h5f["val"].create_group(f"iteration_{i}")
-            
-            for filled_buffer, game_time_taken, game_id, winner in actor_generator:
-                if "columns" not in h5f.attrs:
-                    h5f.attrs["columns"] = list(filled_buffer.flattened_column_names_and_types_dict.keys())
-
-                games_played += 1
-                time_taken = time.time() - time_now
-                estimated_time_left = time_taken / games_played * (GAMES_PER_ITERATION - games_played)
-
-                pre_append = time.time()
-
-                if winner is None:
-                    print(f"WARNING: [SelfPlay] game {game_id} had no winner")
-                    continue
-                else:
-                    wins[winner] += 1
-                    buffer_np = filled_buffer.export_flattened()
-                    if completed_games_per_iteration["train"][f"iteration_{i}"] % (int(1/TRAIN_VAL_SPLIT)-1) == 0:
-                        h5f_val_it.create_dataset(f"game_{game_id}", data=buffer_np)
-                        completed_games_per_iteration["val"][f"iteration_{i}"] += 1
-                        steps_collected_per_iteration["val"][f"iteration_{i}"] += filled_buffer.size
-                    else:
-                        completed_games_per_iteration["train"][f"iteration_{i}"] += 1
-                        steps_collected_per_iteration["train"][f"iteration_{i}"] += filled_buffer.size
-                        h5f_train_it.create_dataset(f"game_{game_id}", data=buffer_np)
-                print(f"game {games_played}/{len(game_ids)}, estimated seconds left: {round(estimated_time_left)}, latest game took {game_time_taken}s to complete, appending buffer took {time.time() - pre_append}", end="\r" if games_played < len(game_ids) else "\n")
-        print(f"It: {i} | wins: {wins} time: {time.time() - t1}")
-
-        subset_rules[f"iteration_{i}"] = 1.0
-
-        if completed_games_per_iteration["val"][f"iteration_{i}"] + completed_games_per_iteration["train"][f"iteration_{i}"] == 0:
-            print(f"completed games this iteration is 0 pitting is not possible, skipping pitting computation and model trainig")
-            continue
-
-        current_agent_win_ratio = wins[current_agent_name] / (wins[current_agent_name] + wins[best_agent_name])
-        if current_agent_win_ratio > 0.55 and iterations_since_new_best_agent > 0:
-            print(f"new best agent found in iteration {i}, win ratio: {current_agent_win_ratio}")
-            print("computing elo ratings")
-            pit.add_agent_and_compute_ratings(copy.deepcopy(current_agent), f"agent_{i}", start_state=GAME_START_STATE)
-            pit.print_rankings()
-            best_agent = copy.deepcopy(current_agent)
-            best_agent_name = copy.deepcopy(current_agent_name)
-            training_agents[1] = {"name": best_agent_name, "agent": best_agent}
-            iterations_since_new_best_agent = 0
-            number_of_agent_updates += 1
-            for iteration in subset_rules.keys():
-                subset_rules[iteration] = 0.0
+    with SelfPlayLogger(buffer_log_path=buffer_log_path) as selfplaylogger:
+        for i in range(100):
             subset_rules[f"iteration_{i}"] = 1.0
-        else:
-            print(f"current agent win ratio: {current_agent_win_ratio}")
-        
-        try:
-            with mlflow.start_run() as run:
+            game_ids = np.arange(GAMES_PER_ITERATION)
+
+            selfplaylogger.start_iteration(
+                game_ids=game_ids,
+                val_fraction=TRAIN_VAL_SPLIT,
+                subset_rules=subset_rules,
+                agent_names=[agent["name"] for agent in training_agents.values()],
+            )
+
+            buffer = Buffer(
+                observation_space=env.observation_space,
+                action_space=env.action_space,
+                capacity=BUFFER_CAPACITY,
+            )
+
+            print("WARNING: USING VERY SIMPLE START STATE")
+            env.reset()
+            state = env.state_dict()
+            state["player_info"]["player 0"]["coins"] = 29
+            state["player_info"]["player 1"]["coins"] = 29
+            state["marketplace"]["landmark"]["pos_0"]["card"] = "Launch Pad"
+            state["marketplace"]["landmark"]["pos_1"]["card"] = "Loan Office"
+            state["marketplace"]["landmark"]["pos_2"]["card"] = "Soda Bottling Plant"
+            state["marketplace"]["landmark"]["pos_3"]["card"] = "Charterhouse"
+            state["marketplace"]["landmark"]["pos_4"]["card"] = "Temple"
+            GAME_START_STATE = env.state_dict_to_array(state)
+
+            if use_ray:
+                actor_generator = actor_pool.map_unordered(
+                    lambda a, v: a.play_game.remote(v, env, GAME_START_STATE, training_agents, buffer),
+                    game_ids,
+                )
+            else:
+                actor_generator = (actor.play_game(v, env, GAME_START_STATE, training_agents, buffer) for v in game_ids)
+                
+            for filled_buffer, game_time_taken, game_id, winner in actor_generator:
+                selfplaylogger.log_game(filled_buffer, game_time_taken, game_id, winner)
+            
+            if selfplaylogger.completed_games_current_iteration == 0:
+                print(f"completed games this iteration is 0, pitting is not possible, skipping pitting computation and model trainig")
+                continue
+            
+            wins = selfplaylogger.wins_current_iteration
+            current_agent_win_ratio = wins[current_agent_name] / (wins[current_agent_name] + wins[best_agent_name])
+            
+            if current_agent_win_ratio > 0.55 and iterations_since_new_best_agent > 0:
+                print(f"new best agent found in iteration {i}, win ratio: {current_agent_win_ratio}")
+                print("computing elo ratings")
+                pit.add_agent_and_compute_ratings(copy.deepcopy(current_agent), f"agent_{i}", start_state=GAME_START_STATE)
+                pit.print_rankings()
+                best_agent = copy.deepcopy(current_agent)
+                best_agent_name = copy.deepcopy(current_agent_name)
+                training_agents[1] = {"name": best_agent_name, "agent": best_agent}
+                iterations_since_new_best_agent = 0
+                selfplaylogger.log_agent_update()
+                for iteration in subset_rules.keys():
+                    subset_rules[iteration] = 0.0
+                subset_rules[f"iteration_{i}"] = 1.0
+            else:
+                print(f"current agent win ratio: {current_agent_win_ratio}")
+
+            try:
                 current_agent.mcts.pvnet.train_hdf5(
                     batch_size=BATCH_SIZE,
                     epochs=PVNET_TRAIN_EPOCHS,
                     train_val_split=TRAIN_VAL_SPLIT,
                     lr=LR,
                     weight_decay=WEIGHT_DECAY,
-                    hdf5_file_path=buffer_path,
+                    hdf5_file_path=buffer_log_path,
                     subset_rules=subset_rules,
                     reset_weights=True,
                 )
-            current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}.pt")
-            current_agent_name = f"agent_{i}"
-            training_agents[0] = {"name": current_agent_name, "agent": current_agent}
-        except NotEnoughDataError:
-            print("Not enough data to train model, skipping training")
-            current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}_same_as_before_due_to_not_enough_data.pt") 
-        iterations_since_new_best_agent += 1
+                current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}.pt")
+                current_agent_name = f"agent_{i}"
+                training_agents[0] = {"name": current_agent_name, "agent": current_agent}
+            except NotEnoughDataError:
+                print("Not enough data to train model, skipping training")
+                current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}_same_as_before_due_to_not_enough_data.pt") 
+            iterations_since_new_best_agent += 1
 
 
 if __name__ == "__main__":
