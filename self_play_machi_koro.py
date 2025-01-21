@@ -10,10 +10,7 @@ import sys
 import time
 import random, os
 from ray.util.actor_pool import ActorPool
-import cProfile
 from mcts_agent import PVNet
-from typing import Optional
-from collections import OrderedDict
 from multielo import MultiElo
 import datetime
 import copy
@@ -43,13 +40,14 @@ GAME_STATE_EMPTY_DECKS = np.array([ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  
         0, -1,  0,  -1,  0, -1,  0, -1,  0, -1,  0,  0,  0])
 
 class SelfPlayLogger:
-    def __init__(self, buffer_log_path: str):
+    def __init__(self, buffer_log_path: str, env):
         self.iteration = -1
         self.steps_collected_per_iteration = {"val": {}, "train": {}}
         self.completed_games_per_iteration = {"val": {}, "train": {}}
         self.current_agents = None
         self.buffer_log_path = buffer_log_path
         self.number_of_agent_updates = 0
+        self.env = env
 
     def __enter__(self):
         self.h5f = h5py.File(self.buffer_log_path, "w")
@@ -69,8 +67,6 @@ class SelfPlayLogger:
         ):
         self.iteration += 1
         self.new_iteration = True
-
-        # self.averge_time_left_estimate = deque(maxlen=10)
         
         assert len(subset_rules) == (self.iteration+1), "subset rules should be defined for each iteration"
         self.subset_rules = subset_rules
@@ -92,6 +88,8 @@ class SelfPlayLogger:
         self.wins_current_iteration = {agent_name: 0 for agent_name in agent_names}
         self.games_with_no_winner_current_iteration = 0
 
+        self.game_lengths_current_iteration = []
+
     def log_game(self, buffer, game_time_taken, game_id, winner):
         self.games_played[game_id] = {"time_taken": game_time_taken, "winner": winner}
 
@@ -102,6 +100,7 @@ class SelfPlayLogger:
 
         if winner is not None:
             buffer_np = buffer.export_flattened()
+            self.game_lengths_current_iteration.append(buffer.size)
             self.wins_current_iteration[winner] += 1
             if game_id in self.val_indices:
                 self.h5f["val"][f"iteration_{self.iteration}"].create_dataset(f"game_{game_id}", data=buffer_np)
@@ -128,8 +127,8 @@ class SelfPlayLogger:
     ):
         # Cursor handling: Clear previous output if not the first call
         if not self.new_iteration:
-            # Move cursor up 13 lines and clear each line
-            for _ in range(13):  # 13 is the number of lines printed
+            # Move cursor up 17 lines and clear each line
+            for _ in range(17):  # 17 is the number of lines printed
                 sys.stdout.write("\033[F\033[K")  # Move up and clear line
         else:
             self.new_iteration = False
@@ -175,6 +174,10 @@ class SelfPlayLogger:
         sys.stdout.write(f"wins: {self.wins_current_iteration}\n")
         sys.stdout.write(f"next_training_run: {train_games_for_next_training_run} games, {train_steps_for_next_training_run} steps\n")
         sys.stdout.write(f"next_validation_run: {val_games_for_next_training_run} games, {val_steps_for_next_training_run} steps\n")
+        sys.stdout.write(f"mean_game_lengths: {np.mean(self.game_lengths_current_iteration):.2f} steps\n")
+        sys.stdout.write(f"std_game_lengths: {np.std(self.game_lengths_current_iteration):.2f} steps\n")
+        sys.stdout.write(f"min_game_length: {np.min(self.game_lengths_current_iteration)} steps\n")
+        sys.stdout.write(f"max_game_length: {np.max(self.game_lengths_current_iteration)} steps\n")
         sys.stdout.write("##################################################################################\n")
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -215,7 +218,6 @@ class MCTSActor:
             current_player_index = obs[env.observation_indices["current_player_index"]]
             action, probs = agents[current_player_index]["agent"].compute_action(obs)
 
-            # print(f"worker: {worker_id} | game: {game_id} | steps: {steps} | buffer_size: {buffer.size} | player {env.current_player_index} played {env._action_idx_to_str[action]} | coins = {env._env.player_coins(env.current_player)}")
             next_obs, reward, done, truncated, info = env.step(action)     
             steps += 1
             if buffer is not None:
@@ -247,8 +249,6 @@ class MCTSActor:
                 else:
                     winner = None
                 time_taken = time.time() - t00
-                # del env
-                # del agents
                 return buffer, time_taken, game_id, winner
             obs = next_obs
 
@@ -352,19 +352,30 @@ class Pit:
         for agent, info in self._agents.items():
             print(f"{agent} | elo: {info['elo']} | wins: {info['wins']}")
 
+def create_ray_actor_pool():
+    n_workers = int(ray.available_resources()["CPU"] - 1)
+    print(f"Found {n_workers} CPU cores available for workers")
+    return ActorPool(
+        [
+            ray.remote(MCTSActor).remote(
+                worker_id=i
+            ) for i in range(n_workers)
+        ]
+    )
+
 def main():
-    MCTS_SIMULATIONS = 100
+    MCTS_SIMULATIONS = 1000
     PUCT = 2
     PVNET_TRAIN_EPOCHS = 30
     BATCH_SIZE = 64
-    GAMES_PER_ITERATION = 2000
+    GAMES_PER_ITERATION = 1000
     # CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
     CARD_INFO_PATH = "card_info_machi_koro_2_quick_game.yaml"
     TRAIN_VAL_SPLIT = 0.2
     LR = 0.001
     WEIGHT_DECAY = 1e-5
     N_PLAYERS = 2
-    BUFFER_CAPACITY = 10
+    BUFFER_CAPACITY = 1000
 
     use_ray = True
     # with open("src/checkpoints/9.pkl", "rb") as file:
@@ -385,19 +396,6 @@ def main():
     )
 
     GAME_START_STATE = None
-    # GAME_START_STATE = GAME_STATE_EMPTY_DECKS
-    # for player_info in temp_env.observation_indices["player_info"].values():
-    #     cards = player_info["cards"]
-    #     GAME_START_STATE[cards["Harbor"]] = 1
-    #     GAME_START_STATE[cards["Train Station"]] = 1
-    #     GAME_START_STATE[cards["Shopping Mall"]] = 1
-    #     GAME_START_STATE[cards["Amusement Park"]] = 1
-    #     GAME_START_STATE[cards["Moon Tower"]] = 1
-    #     GAME_START_STATE[cards["Airport"]] = 0
-    #     GAME_START_STATE[player_info["coins"]] = 29
-    # GAME_START_STATE[temp_env.observation_indices["marketplace"]["1-6"]["pos_0"]["card"]] = temp_env._env._card_name_to_num["Wheat Field"]
-    # GAME_START_STATE[temp_env.observation_indices["marketplace"]["1-6"]["pos_0"]["count"]] = 2
-    # env.reset(GAME_START_STATE)
 
     current_agent = MCTSAgent(
         env=env,
@@ -407,15 +405,7 @@ def main():
         dirichlet_to_root_node=True,
     )
     if use_ray:
-        n_workers = int(ray.available_resources()["CPU"] - 1)
-        print(f"Found {n_workers} CPU cores available for workers")
-        actor_pool = ActorPool(
-            [
-                ray.remote(MCTSActor).remote(
-                    worker_id=i
-                ) for i in range(n_workers)
-            ]
-        )
+        actor_pool = create_ray_actor_pool()
     else:
         actor = MCTSActor(
             worker_id=0
@@ -441,7 +431,10 @@ def main():
     subset_rules = {}
     iterations_since_new_best_agent = 0
 
-    with SelfPlayLogger(buffer_log_path=buffer_log_path) as selfplaylogger:
+    with open(f"{checkpoint_dir}/env.pickle", 'wb') as handle:
+        pickle.dump(env, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with SelfPlayLogger(buffer_log_path=buffer_log_path, env=env) as selfplaylogger:
         for i in range(100):
             subset_rules[f"iteration_{i}"] = 1.0
             game_ids = np.arange(GAMES_PER_ITERATION)
@@ -459,18 +452,7 @@ def main():
                 capacity=BUFFER_CAPACITY,
             )
 
-            print("WARNING: USING VERY SIMPLE START STATE")
-            env.reset()
-            state = env.state_dict()
-            state["player_info"]["player 0"]["coins"] = 29
-            state["player_info"]["player 1"]["coins"] = 29
-            state["marketplace"]["landmark"]["pos_0"]["card"] = "Launch Pad"
-            state["marketplace"]["landmark"]["pos_1"]["card"] = "Loan Office"
-            state["marketplace"]["landmark"]["pos_2"]["card"] = "Soda Bottling Plant"
-            state["marketplace"]["landmark"]["pos_3"]["card"] = "Charterhouse"
-            state["marketplace"]["landmark"]["pos_4"]["card"] = "Temple"
-            GAME_START_STATE = env.state_dict_to_array(state)
-
+            print("creating actor_pool")
             if use_ray:
                 actor_generator = actor_pool.map_unordered(
                     lambda a, v: a.play_game.remote(v, env, GAME_START_STATE, training_agents, buffer),
@@ -478,9 +460,17 @@ def main():
                 )
             else:
                 actor_generator = (actor.play_game(v, env, GAME_START_STATE, training_agents, buffer) for v in game_ids)
-                
-            for filled_buffer, game_time_taken, game_id, winner in actor_generator:
-                selfplaylogger.log_game(filled_buffer, game_time_taken, game_id, winner)
+            print("starting generator")
+            try:
+                for filled_buffer, game_time_taken, game_id, winner in actor_generator:
+                    selfplaylogger.log_game(filled_buffer, game_time_taken, game_id, winner)
+            except KeyboardInterrupt:
+                print("KeyboardInterrupt: stopping self play for current iteration")
+                if use_ray:
+                    for actor in actor_pool._future_to_actor.values():
+                        ray.kill(actor[1])
+                    actor_pool = create_ray_actor_pool()
+
             
             if selfplaylogger.completed_games_current_iteration == 0:
                 print(f"completed games this iteration is 0, pitting is not possible, skipping pitting computation and model trainig")
