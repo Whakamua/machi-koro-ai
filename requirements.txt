@@ -9,3 +9,5 @@ matplotlib
 tabulate
 polars
 h5py
+mlflow
+fire
