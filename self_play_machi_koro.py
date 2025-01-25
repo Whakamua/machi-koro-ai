@@ -17,6 +17,26 @@ import copy
 import h5py
 from mcts_agent import NotEnoughDataError
 from collections import deque
+import logging
+
+def setup_logger(logging_file_path: str):
+    """Sets up a centralized logger to log to both the console and a file."""
+    logger = logging.getLogger("SelfPlayFileLogger")
+    logger.setLevel(logging.INFO)  # Set the logging level
+
+    # Check if the logger already has handlers to avoid duplicates
+    if not logger.handlers:
+        # File handler (writes to selfplay.log)
+        file_handler = logging.FileHandler(logging_file_path)
+        file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(file_handler)
+
+        # Stream handler (prints to stdout)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(console_handler)
+
+    return logger
 
 def seed_all(seed):
     random.seed(seed)
@@ -40,39 +60,78 @@ GAME_STATE_EMPTY_DECKS = np.array([ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  
         0, -1,  0,  -1,  0, -1,  0, -1,  0, -1,  0,  0,  0])
 
 class SelfPlayLogger:
-    def __init__(self, buffer_log_path: str, env):
+    def __init__(self, checkpoint_dir: str, env, hyperparams):
         self.iteration = -1
         self.steps_collected_per_iteration = {"val": {}, "train": {}}
         self.completed_games_per_iteration = {"val": {}, "train": {}}
-        self.current_agents = None
-        self.buffer_log_path = buffer_log_path
+        self.buffer_log_path = checkpoint_dir + "/buffers.h5"
+        self.logger_state_path = checkpoint_dir + "/logger_state.pkl"
         self.number_of_agent_updates = 0
         self.env = env
+        self.hyperparams = hyperparams
+        self.best_agent_name = "agent_0_init_copy"
+        self.current_agent_name = "agent_0"
+        self.agents = {
+            "agent_0_init_copy": {
+                "elo": 1000,
+                "wins": 0,
+                "subset_rules": {},
+                "pittable": True
+            },
+            "agent_0": {
+                "elo": 1000,
+                "wins": 0,
+                "subset_rules": {},
+                "pittable": False
+            }
+        }
+        self.iterations_since_new_best_agent = 0
+
+        # Get the centralized logger
+        self.file_logger = logging.getLogger("SelfPlayFileLogger")
+
+
+    def save_logger_state(self):
+        with open(self.logger_state_path, "wb") as file:
+            pickle.dump({k: v for k, v in self.__dict__.items() if k not in ["h5f"]}, file)
+
+    def load_logger_state(self):
+        with open(self.logger_state_path, "rb") as file:
+            self.__dict__.update(pickle.load(file))
+
+        # deleting iteration groups that were not completed
+        if f"iteration_{self.iteration+1}" in self.h5f["train"]:
+            del self.h5f["train"][f"iteration_{self.iteration+1}"]
+        if f"iteration_{self.iteration+1}" in self.h5f["val"]:
+            del self.h5f["val"][f"iteration_{self.iteration+1}"]
 
     def __enter__(self):
-        self.h5f = h5py.File(self.buffer_log_path, "w")
-        self.h5f.create_group("train")
-        self.h5f.create_group("val")
+        #check if the buffer log file exists
+        if os.path.exists(self.buffer_log_path):
+            self.h5f = h5py.File(self.buffer_log_path, "r+")
+        else:
+            self.h5f = h5py.File(self.buffer_log_path, "w")
+            self.h5f.create_group("train")
+            self.h5f.create_group("val")
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.h5f.close()
 
-    def start_iteration(
-            self,
-            game_ids: int,
-            val_fraction,
-            subset_rules: dict[str, float],
-            agent_names: list[str],
-        ):
+    def current_agent_win_ratio_current_iteration(self):
+        wins_current_agent = self.wins_current_iteration[self.current_agent_name]
+        total_wins = sum(self.wins_current_iteration.values())
+        return wins_current_agent / total_wins if total_wins > 0 else 0
+
+    def start_iteration(self, game_ids: int, val_fraction, agent_names_for_iteration: list[str], subset_rule_for_current_agent_this_iteration: float):
         self.iteration += 1
         self.new_iteration = True
+
+        self.agents[self.current_agent_name]["subset_rules"][f"iteration_{self.iteration}"] = subset_rule_for_current_agent_this_iteration
         
-        assert len(subset_rules) == (self.iteration+1), "subset rules should be defined for each iteration"
-        self.subset_rules = subset_rules
         self.iteration_start_time = time.time()
         self.number_of_games_for_current_iteration = len(game_ids)
-        self.val_indices = np.random.choice(game_ids, int(len(game_ids) * (val_fraction)), replace=False)
+        self.val_indices = np.random.choice(game_ids, int(len(game_ids) * val_fraction), replace=False)
 
         self.games_played = {}
         self.games_time_taken_deque = deque(maxlen=100)
@@ -85,7 +144,7 @@ class SelfPlayLogger:
         self.h5f["train"].create_group(f"iteration_{self.iteration}")
         self.h5f["val"].create_group(f"iteration_{self.iteration}")
 
-        self.wins_current_iteration = {agent_name: 0 for agent_name in agent_names}
+        self.wins_current_iteration = {agent_name: 0 for agent_name in agent_names_for_iteration}
         self.games_with_no_winner_current_iteration = 0
 
         self.game_lengths_current_iteration = []
@@ -113,75 +172,105 @@ class SelfPlayLogger:
         else:
             self.games_with_no_winner_current_iteration += 1
 
-        self.log()
+        self.log_summary(final=False)
 
-    def log_agent_update(self):
+    def log_agent_update(self, new_current_agent_name, best_agent_name):
         self.number_of_agent_updates += 1
+
+        assert best_agent_name in self.agents, f"best agent {best_agent_name} not in agents"
+        assert new_current_agent_name not in self.agents, f"new current agent {new_current_agent_name} already in agents"
+
+        if best_agent_name == self.best_agent_name:
+            self.iterations_since_new_best_agent += 1
+        else:
+            self.iterations_since_new_best_agent = 0
+
+        self.agents[new_current_agent_name] = {
+            "elo": 1000,
+            "wins": 0,
+            "subset_rules": self.agents[self.current_agent_name]["subset_rules"],
+            "pittable": False
+        }
+
+        self.current_agent_name = new_current_agent_name
+        self.best_agent_name = best_agent_name
+
 
     @property
     def completed_games_current_iteration(self):
         return self.completed_games_per_iteration["train"][f"iteration_{self.iteration}"] + self.completed_games_per_iteration["val"][f"iteration_{self.iteration}"]
 
-    def log(
-        self,
-    ):
-        # Cursor handling: Clear previous output if not the first call
-        if not self.new_iteration:
-            # Move cursor up 17 lines and clear each line
-            for _ in range(17):  # 17 is the number of lines printed
-                sys.stdout.write("\033[F\033[K")  # Move up and clear line
-        else:
-            self.new_iteration = False
-        
-        avg_game_time = np.mean(self.games_time_taken_deque)
+    def log_summary(self, final=False):
+        avg_game_time = np.mean(self.games_time_taken_deque) if self.games_time_taken_deque else 0
         estimated_iteration_time_left = avg_game_time * (self.number_of_games_for_current_iteration - len(self.games_played))
 
         train_games_for_next_training_run = int(
             sum([
-                    self.completed_games_per_iteration["train"][iteration] * fraction
-                    for iteration, fraction in self.subset_rules.items()
-                ])
+                self.completed_games_per_iteration["train"][iteration] * fraction
+                for iteration, fraction in self.agents[self.current_agent_name]["subset_rules"].items()
+            ])
         )
         val_games_for_next_training_run = int(
             sum([
-                    self.completed_games_per_iteration["val"][iteration] * fraction
-                    for iteration, fraction in self.subset_rules.items()
-                ])
+                self.completed_games_per_iteration["val"][iteration] * fraction
+                for iteration, fraction in self.agents[self.current_agent_name]["subset_rules"].items()
+            ])
         )
 
         train_steps_for_next_training_run = int(
             sum([
-                    self.steps_collected_per_iteration["train"][iteration] * fraction
-                    for iteration, fraction in self.subset_rules.items()
-                ])
+                self.steps_collected_per_iteration["train"][iteration] * fraction
+                for iteration, fraction in self.agents[self.current_agent_name]["subset_rules"].items()
+            ])
         )
         val_steps_for_next_training_run = int(
             sum([
-                    self.steps_collected_per_iteration["val"][iteration] * fraction
-                    for iteration, fraction in self.subset_rules.items()
-                ])
+                self.steps_collected_per_iteration["val"][iteration] * fraction
+                for iteration, fraction in self.agents[self.current_agent_name]["subset_rules"].items()
+            ])
         )
-        # breakpoint()
 
-        sys.stdout.write("\n")
-        sys.stdout.write("##################################################################################\n")
-        sys.stdout.write(f"iteration {self.iteration}\n")
-        sys.stdout.write(f"agent_updates: {self.number_of_agent_updates}\n")
-        sys.stdout.write(f"games_played: {len(self.games_played)}/{self.number_of_games_for_current_iteration}\n")
-        sys.stdout.write(f"games_with_no_winner/completed_games: {self.games_with_no_winner_current_iteration}/{len(self.games_played)}\n")
-        sys.stdout.write(f"estimated_iteration_time_left: {estimated_iteration_time_left:.0f}s\n")
-        sys.stdout.write(f"last_game_time_taken: {self.games_time_taken_deque[-1]:.4f}s\n")
-        sys.stdout.write(f"wins: {self.wins_current_iteration}\n")
-        sys.stdout.write(f"next_training_run: {train_games_for_next_training_run} games, {train_steps_for_next_training_run} steps\n")
-        sys.stdout.write(f"next_validation_run: {val_games_for_next_training_run} games, {val_steps_for_next_training_run} steps\n")
-        sys.stdout.write(f"mean_game_lengths: {np.mean(self.game_lengths_current_iteration):.2f} steps\n")
-        sys.stdout.write(f"std_game_lengths: {np.std(self.game_lengths_current_iteration):.2f} steps\n")
-        sys.stdout.write(f"min_game_length: {np.min(self.game_lengths_current_iteration)} steps\n")
-        sys.stdout.write(f"max_game_length: {np.max(self.game_lengths_current_iteration)} steps\n")
-        sys.stdout.write("##################################################################################\n")
-        sys.stdout.write("\n")
+        summary = f"""
+##################################################################################
+Iteration: {self.iteration}
+Agent Updates: {self.number_of_agent_updates}
+Games Played: {len(self.games_played)}/{self.number_of_games_for_current_iteration}
+Games With No Winner/Completed Games: {self.games_with_no_winner_current_iteration}/{len(self.games_played)}
+Estimated Iteration Time Left: {estimated_iteration_time_left:.0f}s
+Last Game Time Taken: {self.games_time_taken_deque[-1] if self.games_time_taken_deque else 0:.4f}s
+Wins: {self.wins_current_iteration}
+Next Training Run: {train_games_for_next_training_run} games, {train_steps_for_next_training_run} steps
+Next Validation Run: {val_games_for_next_training_run} games, {val_steps_for_next_training_run} steps
+Mean Game Length: {np.mean(self.game_lengths_current_iteration):.2f} steps
+Standard Deviation Game Length: {np.std(self.game_lengths_current_iteration):.2f} steps
+Minimum Game Length: {np.min(self.game_lengths_current_iteration) if self.game_lengths_current_iteration else 0} steps
+Maximum Game Length: {np.max(self.game_lengths_current_iteration) if self.game_lengths_current_iteration else 0} steps
+Agent Elo Ratings:
+"""
+        for agent, info in self.agents.items():
+            if info["pittable"]:
+                summary += f"{agent} | elo: {info['elo']} | wins: {info['wins']}\n"
+        summary += """
+##################################################################################
+"""
+        if not self.new_iteration:
+            self.clear_stdout()
+        else:
+            self.new_iteration = False
+
+        sys.stdout.write(summary + "\n")
+        self.n_agents_last_summary = len([agent for agent in self.agents.values() if agent["pittable"]])
         sys.stdout.flush()
 
+        if final:
+            self.clear_stdout()
+            sys.stdout.flush()
+            self.file_logger.info(summary + "\n")
+            self.n_agents_last_summary = len([agent for agent in self.agents.values() if agent["pittable"]])
+
+    def clear_stdout(self):
+        for _ in range(19+self.n_agents_last_summary):
+            sys.stdout.write("\033[F\033[K")
 
 class MCTSActor:
     def __init__(
@@ -197,7 +286,7 @@ class MCTSActor:
             env,
             game_start_state,
             agents,
-            buffer,
+            buffer=None,
         ):
         t00 = time.time()
         env = copy.deepcopy(env)
@@ -253,104 +342,67 @@ class MCTSActor:
             obs = next_obs
 
 
-class Pit:
-    def __init__(
-        self,
-        env,
-        use_ray,
-        games_per_addition=30,
-    ):
-        self._env = env
-        self._agents = {}
-        self._elo = MultiElo()
-        self._use_ray = use_ray
-        self._games_per_addition = games_per_addition
-        self._n_new_agents = 0
+def pit_agents(
+    existing_agents,
+    new_agent,
+    n_games,
+    env,
+    checkpoint_dir,
+    start_state=None,
+    use_ray=True,
+):
+    existing_agents[new_agent]["pittable"] = True
+    game_ids = np.arange(n_games)
 
-        if self._use_ray:
-            n_workers = int(ray.available_resources()["CPU"] - 1)
-            print(f"Found {n_workers} CPU cores available for workers")
-            self._actor_pool = ActorPool(
-                [
-                    ray.remote(MCTSActor).remote(
-                        worker_id=i
-                    ) for i in range(n_workers)
-                ]
-            )
+    agent_objects = {
+        agent_name: MCTSAgent.load_from_pickle(f"{checkpoint_dir}/{agent_name}.pickle")
+        for agent_name in existing_agents if existing_agents[agent_name]["pittable"]
+    }
+
+    def get_agent_dict(agent_pair, agent_objects):
+        return {i: {"name": agent_name, "agent": agent_objects[agent_name]} for i, agent_name in enumerate(agent_pair)}
+
+    agent_pairs_per_game_id = {
+        game_id: [new_agent, np.random.choice([agent for agent, agent_info in existing_agents.items() if agent != new_agent and agent_info["pittable"]], 1)[0]]
+        for game_id in game_ids
+    }
+
+    # shuffling agent pairs to avoid bias, since order is the order in which agents start in 
+    # the game. This is important because the first player has a slight advantage in Machi Koro
+    for agent_pair in agent_pairs_per_game_id.values():
+        random.shuffle(agent_pair)
+
+    if use_ray:
+        actor_pool = create_ray_actor_pool()
+        actor_generator = actor_pool.map_unordered(
+            lambda a, v: a.play_game.remote(v, env, start_state, get_agent_dict(agent_pairs_per_game_id[v], agent_objects)),
+            game_ids,
+        )
+    else:
+        actor = MCTSActor(
+            worker_id=0
+        )
+        actor_generator = (actor.play_game(v, env, start_state, get_agent_dict(agent_pairs_per_game_id[v], agent_objects)) for v in game_ids)
+
+    elo = MultiElo()
+
+    for _, _, game_id, winner in actor_generator:
+        if winner is None:
+            print(f"WARNING: [Pit] game {game_id} had no winner")
+            continue
         else:
-            self.actor = MCTSActor(
-                worker_id=0
-            )
+            existing_agents[winner]["wins"] += 1
 
+            # compute new elo ratings
+            agents_playing = agent_pairs_per_game_id[game_id]
+            current_ratings = [existing_agents[agent]["elo"] for agent in agents_playing]
 
-    def add_initial_agent(self, name, agent):
-        assert self._agents == {}, "agents should be empty when adding initial agent"
-        self._add_agent(agent, name)
-    
+            ranking = [1 if agent == winner else 2 for agent in agents_playing]
+            new_ratings = elo.get_new_ratings(current_ratings, result_order=ranking)
 
-    def _add_agent(self, agent, name):
-        self._agents[name] = {
-            "agent_number": len(self._agents),
-            "agent": agent,
-            "elo": 1000,
-            "wins": 0,
-        }
-
-
-    def add_agent_and_compute_ratings(self, agent, player_name, start_state=None):
-        self._add_agent(agent, player_name)
-        self._n_new_agents += 1
-        self._compute_ratings_with_1_new_agent(self._games_per_addition, start_state)
-
-    def get_agent_dict(self, agent_pair):
-        return {i: {"name": agent_name, "agent": self._agents[agent_name]["agent"]} for i, agent_name in enumerate(agent_pair)}
-
-    def _compute_ratings_with_1_new_agent(
-        self,
-        n_games,
-        start_state=None,
-    ):
-        assert self._n_new_agents == 1, "only 1 new agent allowed when computing ratings"
-        game_ids = np.arange(n_games)
-        
-        agent_pairs_per_game_id = {
-            game_id: [list(self._agents.keys())[-1], np.random.choice(list(self._agents.keys())[:-1], 1)[0]]
-            for game_id in game_ids
-        }
-        # shuffling agent pairs to avoid bias, since order is the order in which agents start in 
-        # the game. This is important because the first player has a slight advantage in Machi Koro
-        for agent_pair in agent_pairs_per_game_id.values():
-            random.shuffle(agent_pair)
-
-        if self._use_ray:
-            actor_generator = self._actor_pool.map_unordered(
-                lambda a, v: a.play_game.remote(v, self._env, start_state, self.get_agent_dict(agent_pairs_per_game_id[v]), None),
-                game_ids,
-            )
-        else:
-            actor_generator = (self.actor.play_game(v, self._env, start_state, self.get_agent_dict(agent_pairs_per_game_id[v]), None) for v in game_ids)
-
-        for buffer, time_taken, game_id, winner in actor_generator:
-            if winner is None:
-                print(f"WARNING: [Pit] game {game_id} had no winner")
-                continue
-            else:
-                self._agents[winner]["wins"] += 1
-
-                # compute new elo ratings
-                agents_playing = agent_pairs_per_game_id[game_id]
-                current_ratings = [self._agents[agent]["elo"] for agent in agents_playing]
-
-                ranking = [1 if agent == winner else 2 for agent in agents_playing]
-                new_ratings = self._elo.get_new_ratings(current_ratings, result_order=ranking)
-
-                for i, agent in enumerate(agents_playing):
-                    self._agents[agent]["elo"] = new_ratings[i]
-        self._n_new_agents = 0
-
-    def print_rankings(self):
-        for agent, info in self._agents.items():
-            print(f"{agent} | elo: {info['elo']} | wins: {info['wins']}")
+            for i, agent in enumerate(agents_playing):
+                existing_agents[agent]["elo"] = new_ratings[i]
+    return existing_agents
 
 def create_ray_actor_pool():
     n_workers = int(ray.available_resources()["CPU"] - 1)
@@ -363,161 +415,172 @@ def create_ray_actor_pool():
         ]
     )
 
-def main():
-    MCTS_SIMULATIONS = 1000
-    PUCT = 2
-    PVNET_TRAIN_EPOCHS = 30
-    BATCH_SIZE = 64
-    GAMES_PER_ITERATION = 1000
-    # CARD_INFO_PATH = "card_info_machi_koro_2.yaml"
-    CARD_INFO_PATH = "card_info_machi_koro_2_quick_game.yaml"
-    TRAIN_VAL_SPLIT = 0.2
-    LR = 0.001
-    WEIGHT_DECAY = 1e-5
-    N_PLAYERS = 2
-    BUFFER_CAPACITY = 1000
+def main(checkpoint_dir=None):
+    
+    if checkpoint_dir is None:
+        starting_from_checkpoint = False
+        checkpoint_dir = "checkpoints/" + str(datetime.datetime.now())
+        os.makedirs(checkpoint_dir)
+    else:
+        starting_from_checkpoint = True
+
+    setup_logger(checkpoint_dir + "/selfplay.log")
+
+    logger = logging.getLogger("SelfPlayFileLogger")
+
+    if starting_from_checkpoint:
+        logger.info(f"Starting self play from checkpoint {checkpoint_dir}")
+    else:
+        logger.info("Starting self play...")
+
+    hyperparams = {
+        "MCTS_SIMULATIONS": 10,
+        "PUCT": 2,
+        "PVNET_TRAIN_EPOCHS": 30,
+        "BATCH_SIZE": 64,
+        "GAMES_PER_ITERATION": 25,
+        # "CARD_INFO_PATH": "card_info_machi_koro_2.yaml",
+        "CARD_INFO_PATH": "card_info_machi_koro_2_quick_game.yaml",
+        "TRAIN_VAL_SPLIT": 0.2,
+        "LR": 0.001,
+        "WEIGHT_DECAY": 1e-5,
+        "N_PLAYERS": 2,
+        "BUFFER_CAPACITY": 1000,
+        "GAME_START_STATE": None
+    }
 
     use_ray = True
-    # with open("src/checkpoints/9.pkl", "rb") as file:
-    #     buffer = pickle.load(file)
-    # model = torch.load("checkpoints_3_static/2.pt")
-    # breakpoint()
     if use_ray:
         ray.init()
 
     env_cls = GymMachiKoro2
-    env_kwargs = {"n_players": N_PLAYERS, "card_info_path": CARD_INFO_PATH}
+    env_kwargs = {"n_players": hyperparams["N_PLAYERS"], "card_info_path": hyperparams["CARD_INFO_PATH"]}
     env = env_cls(**env_kwargs)
 
-    pit = Pit(
-        env=env,
-        use_ray=use_ray,
-        games_per_addition=30,
-    )
-
-    GAME_START_STATE = None
-
-    current_agent = MCTSAgent(
-        env=env,
-        num_mcts_sims=MCTS_SIMULATIONS,
-        c_puct=PUCT,
-        pvnet=PVNet(env, mlflow_experiment_name=f"Self Play {int(time.time())}"),
-        dirichlet_to_root_node=True,
-    )
     if use_ray:
-        actor_pool = create_ray_actor_pool()
+            actor_pool = create_ray_actor_pool()
     else:
         actor = MCTSActor(
             worker_id=0
         )
 
-    checkpoint_dir = "checkpoints/" + str(datetime.datetime.now())
-    os.makedirs(checkpoint_dir)
+    with SelfPlayLogger(checkpoint_dir=checkpoint_dir, env=env, hyperparams=hyperparams) as selfplaylogger:
+        current_agent_name = selfplaylogger.current_agent_name
+        current_agent = MCTSAgent(
+            env=env,
+            num_mcts_sims=hyperparams["MCTS_SIMULATIONS"],
+            c_puct=hyperparams["PUCT"],
+            pvnet=PVNet(env, mlflow_experiment_name=f"Self Play {int(time.time())}"),
+            dirichlet_to_root_node=True,
+        )
+        best_agent_name = selfplaylogger.best_agent_name
+        best_agent = copy.deepcopy(current_agent)
+        best_agent.pickle(f"{checkpoint_dir}/{best_agent_name}.pickle")
 
-    # the best agent is considered the randomly initialized agent at the start
-    best_agent = copy.deepcopy(current_agent)
-    best_agent_name = "init_random_agent"
-    pit.add_initial_agent(best_agent_name, best_agent)
+        if starting_from_checkpoint:
+            selfplaylogger.load_logger_state()
+            current_agent_name = selfplaylogger.current_agent_name
+            current_agent = MCTSAgent.load_from_pickle(f"{checkpoint_dir}/{current_agent_name}.pickle")
+            best_agent_name = selfplaylogger.best_agent_name
+            best_agent = MCTSAgent.load_from_pickle(f"{checkpoint_dir}/{best_agent_name}.pickle")
+            env = selfplaylogger.env
+            hyperparams = selfplaylogger.hyperparams
 
-    # the current agent is initially random as well
-    current_agent_name = "agent_0"
-    training_agents = {
-            0: {"name": current_agent_name, "agent": current_agent},
-            1: {"name": best_agent_name, "agent": best_agent},
-        }
-    assert len(training_agents) == N_PLAYERS, "number of agents should be equal to number of players"
-
-    buffer_log_path=f"{checkpoint_dir}/buffers.h5"
-    subset_rules = {}
-    iterations_since_new_best_agent = 0
-
-    with open(f"{checkpoint_dir}/env.pickle", 'wb') as handle:
-        pickle.dump(env, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    with SelfPlayLogger(buffer_log_path=buffer_log_path, env=env) as selfplaylogger:
         for i in range(100):
-            subset_rules[f"iteration_{i}"] = 1.0
-            game_ids = np.arange(GAMES_PER_ITERATION)
+            training_agents = {
+                0: {"name": selfplaylogger.current_agent_name, "agent": current_agent},
+                1: {"name": selfplaylogger.best_agent_name, "agent": best_agent},
+            }
+            assert len(training_agents) == hyperparams["N_PLAYERS"], "number of agents should be equal to number of players"
+
+            game_ids = np.arange(hyperparams["GAMES_PER_ITERATION"])
 
             selfplaylogger.start_iteration(
                 game_ids=game_ids,
-                val_fraction=TRAIN_VAL_SPLIT,
-                subset_rules=subset_rules,
-                agent_names=[agent["name"] for agent in training_agents.values()],
+                val_fraction=hyperparams["TRAIN_VAL_SPLIT"],
+                agent_names_for_iteration=[agent["name"] for agent in training_agents.values()],
+                subset_rule_for_current_agent_this_iteration=1.0,
             )
 
             buffer = Buffer(
                 observation_space=env.observation_space,
                 action_space=env.action_space,
-                capacity=BUFFER_CAPACITY,
+                capacity=hyperparams["BUFFER_CAPACITY"],
             )
 
-            print("creating actor_pool")
             if use_ray:
                 actor_generator = actor_pool.map_unordered(
-                    lambda a, v: a.play_game.remote(v, env, GAME_START_STATE, training_agents, buffer),
+                    lambda a, v: a.play_game.remote(v, env, hyperparams["GAME_START_STATE"], training_agents, buffer),
                     game_ids,
                 )
             else:
-                actor_generator = (actor.play_game(v, env, GAME_START_STATE, training_agents, buffer) for v in game_ids)
-            print("starting generator")
+                actor_generator = (actor.play_game(v, env, hyperparams["GAME_START_STATE"], training_agents, buffer) for v in game_ids)
+
             try:
                 for filled_buffer, game_time_taken, game_id, winner in actor_generator:
                     selfplaylogger.log_game(filled_buffer, game_time_taken, game_id, winner)
             except KeyboardInterrupt:
-                print("KeyboardInterrupt: stopping self play for current iteration")
+                logger.info("KeyboardInterrupt: stopping self play for current iteration")
                 if use_ray:
                     for actor in actor_pool._future_to_actor.values():
                         ray.kill(actor[1])
                     actor_pool = create_ray_actor_pool()
-
             
             if selfplaylogger.completed_games_current_iteration == 0:
-                print(f"completed games this iteration is 0, pitting is not possible, skipping pitting computation and model trainig")
+                logger.info(f"completed games this iteration is 0, pitting is not possible, skipping pitting computation and model trainig")
                 continue
             
-            wins = selfplaylogger.wins_current_iteration
-            current_agent_win_ratio = wins[current_agent_name] / (wins[current_agent_name] + wins[best_agent_name])
-            
-            if current_agent_win_ratio > 0.55 and iterations_since_new_best_agent > 0:
-                print(f"new best agent found in iteration {i}, win ratio: {current_agent_win_ratio}")
-                print("computing elo ratings")
-                pit.add_agent_and_compute_ratings(copy.deepcopy(current_agent), f"agent_{i}", start_state=GAME_START_STATE)
-                pit.print_rankings()
+            current_agent_win_ratio = selfplaylogger.current_agent_win_ratio_current_iteration()
+            if current_agent_win_ratio > 0.55 and selfplaylogger.iterations_since_new_best_agent > 0:
+                logger.info(f"new best agent found in iteration {selfplaylogger.iteration}, win ratio: {current_agent_win_ratio}")
+                logger.info("computing elo ratings")
+                selfplaylogger.agents = pit_agents(
+                    existing_agents=selfplaylogger.agents,
+                    new_agent=current_agent_name,
+                    n_games=30,
+                    env=env,
+                    checkpoint_dir=checkpoint_dir,
+                    start_state=hyperparams["GAME_START_STATE"],
+                    use_ray=use_ray,
+                )
                 best_agent = copy.deepcopy(current_agent)
                 best_agent_name = copy.deepcopy(current_agent_name)
-                training_agents[1] = {"name": best_agent_name, "agent": best_agent}
-                iterations_since_new_best_agent = 0
-                selfplaylogger.log_agent_update()
-                for iteration in subset_rules.keys():
-                    subset_rules[iteration] = 0.0
-                subset_rules[f"iteration_{i}"] = 1.0
+                
+                subset_rules = selfplaylogger.agents[current_agent_name]["subset_rules"]
+                for i, iteration in enumerate(subset_rules.keys()):
+                    if i < len(subset_rules) - 1:
+                        subset_rules[iteration] = 0.0
+                    else:
+                        subset_rules[iteration] = 1.0
+                selfplaylogger.agents[current_agent_name]["subset_rules"] = subset_rules
             else:
-                print(f"current agent win ratio: {current_agent_win_ratio}")
+                logger.info(f"current agent win ratio: {current_agent_win_ratio}")
 
             try:
                 current_agent.mcts.pvnet.train_hdf5(
-                    batch_size=BATCH_SIZE,
-                    epochs=PVNET_TRAIN_EPOCHS,
-                    train_val_split=TRAIN_VAL_SPLIT,
-                    lr=LR,
-                    weight_decay=WEIGHT_DECAY,
-                    hdf5_file_path=buffer_log_path,
-                    subset_rules=subset_rules,
+                    batch_size=hyperparams["BATCH_SIZE"],
+                    epochs=hyperparams["PVNET_TRAIN_EPOCHS"],
+                    train_val_split=hyperparams["TRAIN_VAL_SPLIT"],
+                    lr=hyperparams["LR"],
+                    weight_decay=hyperparams["WEIGHT_DECAY"],
+                    hdf5_file_path=selfplaylogger.buffer_log_path,
+                    subset_rules=selfplaylogger.agents[current_agent_name]["subset_rules"],
                     reset_weights=True,
                 )
-                current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}.pt")
-                current_agent_name = f"agent_{i}"
-                training_agents[0] = {"name": current_agent_name, "agent": current_agent}
+                current_agent_name = f"agent_{selfplaylogger.iteration+1}"
+                current_agent.pickle(f"{checkpoint_dir}/{current_agent_name}.pickle")
             except NotEnoughDataError:
-                print("Not enough data to train model, skipping training")
-                current_agent.mcts.pvnet.save(f"{checkpoint_dir}/model_{i}_same_as_before_due_to_not_enough_data.pt") 
-            iterations_since_new_best_agent += 1
+                logger.info("Not enough data to train model, skipping training")
+
+            selfplaylogger.log_agent_update(current_agent_name, best_agent_name)
+            selfplaylogger.log_summary(final=True)
+            selfplaylogger.save_logger_state()
 
 
 if __name__ == "__main__":
     # profiler = cProfile.Profile()
     # profiler.enable()
-    main()
+    from fire import Fire
+    Fire(main)
     # profiler.disable()
     # profiler.dump_stats("self_play.prof")

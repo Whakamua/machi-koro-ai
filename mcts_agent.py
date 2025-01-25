@@ -2,7 +2,6 @@ import h5py
 import numpy as np
 from torch import nn
 import torch
-from torch.utils.data import Dataset, DataLoader
 import warnings
 import re
 import time
@@ -12,21 +11,18 @@ import sys
 
 from mcts import MCTS
 import itertools
-from buffer import Buffer
 import copy
 import mlflow
 import os
-
-import h5py
-import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
 from env import GymMachiKoro, MachiKoro
+import logging
+
+logger = logging.getLogger("SelfPlayFileLogger")
 
 class TrainLogger:
     def __init__(self):
         self.first_call = True
+        self.file_logger = logging.getLogger("SelfPlayFileLogger")
 
     def log(
         self,
@@ -40,48 +36,56 @@ class TrainLogger:
         avg_val_value_loss: float,
         policy_done: bool,
         value_done: bool,
+        final: bool = False,
     ):
         # Cursor handling: Clear previous output if not the first call
         if not self.first_call:
-            # Move cursor up 18 lines and clear each line
-            for _ in range(18):  # 18 is the number of lines printed
-                sys.stdout.write("\033[F\033[K")  # Move up and clear line
+            self.clear_stdout()
         else:
             self.first_call = False
 
-        # Log metrics to mlflow
-        mlflow.log_metric("epoch", epoch, step=steps)
-        mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=steps)
-        mlflow.log_metric("train_value_loss", avg_train_value_loss, step=steps)
-        mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=steps)
-        mlflow.log_metric("val_value_loss", avg_val_value_loss, step=steps)
-        mlflow.log_metric("train_loss", avg_train_loss, step=steps)
-        mlflow.log_metric("val_loss", avg_val_loss, step=steps)
+        if not final:
+            # Log metrics to mlflow
+            mlflow.log_metric("epoch", epoch, step=steps)
+            mlflow.log_metric("train_policy_loss", avg_train_policy_loss, step=steps)
+            mlflow.log_metric("train_value_loss", avg_train_value_loss, step=steps)
+            mlflow.log_metric("val_policy_loss", avg_val_policy_loss, step=steps)
+            mlflow.log_metric("val_value_loss", avg_val_value_loss, step=steps)
+            mlflow.log_metric("train_loss", avg_train_loss, step=steps)
+            mlflow.log_metric("val_loss", avg_val_loss, step=steps)
 
-        # Print updated training information
-        sys.stdout.write("\n")
-        sys.stdout.write("############################################\n")
-        sys.stdout.write("Training PV-net:\n")
-        sys.stdout.write("############################################\n")
-        sys.stdout.write(f"Epoch: {epoch}\n")
-        sys.stdout.write("Policy:\n")
-        sys.stdout.write(f"  Train Loss: {avg_train_policy_loss:.4f}\n")
-        sys.stdout.write(f"  Val Loss: {avg_val_policy_loss:.4f}\n")
-        sys.stdout.write(f"  Completion: {'Done' if policy_done else 'In Progress'}\n")
-        sys.stdout.write("Value:\n")
-        sys.stdout.write(f"  Train Loss: {avg_train_value_loss:.4f}\n")
-        sys.stdout.write(f"  Val Loss: {avg_val_value_loss:.4f}\n")
-        sys.stdout.write(f"  Completion: {'Done' if value_done else 'In Progress'}\n")
-        sys.stdout.write("Total:\n")
-        sys.stdout.write(f"  Avg Val Loss: {avg_val_loss:.4f}\n")
-        sys.stdout.write(f"  Avg Train Loss: {avg_train_loss:.4f}\n")
-        sys.stdout.write("############################################\n")
-        sys.stdout.write("\n")
+        # Generate the log summary
+        summary = f"""
+############################################
+Training PV-net:
+############################################
+Epoch: {epoch}
+Policy:
+  Train Loss: {avg_train_policy_loss:.4f}
+  Val Loss: {avg_val_policy_loss:.4f}
+  Completion: {'Done' if policy_done else 'In Progress'}
+Value:
+  Train Loss: {avg_train_value_loss:.4f}
+  Val Loss: {avg_val_value_loss:.4f}
+  Completion: {'Done' if value_done else 'In Progress'}
+Total:
+  Avg Val Loss: {avg_val_loss:.4f}
+  Avg Train Loss: {avg_train_loss:.4f}
+############################################
+"""
+
+        # Print updated training information to stdout
+        sys.stdout.write(summary + "\n")
         sys.stdout.flush()
 
+        if final:
+            self.clear_stdout()
+            sys.stdout.flush()
+            self.file_logger.info(summary + "\n")
 
-
-
+    def clear_stdout(self):
+        for _ in range(18):
+            sys.stdout.write("\033[F\033[K")
 
 class NotEnoughDataError(Exception):
     pass
@@ -534,37 +538,6 @@ class PVNet:
         obss, values, probs = obss.to(self.device), values.to(self.device), probs.to(self.device)
         return obss, values, probs
 
-    def print_training_update(
-            self,
-            epoch: int,
-            avg_train_loss: float,
-            avg_val_loss: float,
-            avg_train_policy_loss: float,
-            avg_train_value_loss: float,
-            avg_val_policy_loss: float,
-            avg_val_value_loss: float,
-            policy_done: bool,
-            value_done: bool,
-    ):
-        # Clear previous output by moving up the lines
-        sys.stdout.write("\033[F" * 9)  # Adjust based on the number of lines printed
-
-        # Print updated training information
-        sys.stdout.write(f"Epoch: {epoch}\n")
-        sys.stdout.write("Training:\n")
-        sys.stdout.write(f"  Avg Train Loss: {avg_train_loss:.4f}\n")
-        sys.stdout.write(f"  Policy Loss: {avg_train_policy_loss:.4f}\n")
-        sys.stdout.write(f"  Value Loss: {avg_train_value_loss:.4f}\n")
-        sys.stdout.write("Validation:\n")
-        sys.stdout.write(f"  Avg Val Loss: {avg_val_loss:.4f}\n")
-        sys.stdout.write(f"  Policy Loss: {avg_val_policy_loss:.4f}\n")
-        sys.stdout.write(f"  Value Loss: {avg_val_value_loss:.4f}\n")
-        sys.stdout.write(f"Completion: Policy {'Done' if policy_done else 'In Progress'}, "
-                        f"Value {'Done' if value_done else 'In Progress'}\n")
-        sys.stdout.flush()
-
-
-
     def train_hdf5(
         self,
         batch_size: int,
@@ -576,7 +549,6 @@ class PVNet:
         subset_rules: dict,
         reset_weights: bool = False,
     ):
-
         try:
             # Initialize the data loader manager
             data_manager = HDF5DataLoader(
@@ -605,7 +577,6 @@ class PVNet:
 
         policy_done = False
         value_done = False
-        
         with mlflow.start_run() as run:
             train_logger = TrainLogger()
             for epoch in range(epochs):
@@ -651,7 +622,6 @@ class PVNet:
 
                     indices_for_all_batches = split_array(np.arange(obss_train.shape[0]), batch_size)
                     
-                    # np.array_split(np.arange(obss_train.shape[0]), math.ceil(obss_train.shape[0] / batch_size)) 
                     for i, batch_indices in enumerate(indices_for_all_batches):
                         steps+=1
                         n_rows_trained_on_in_epoch += len(batch_indices)
@@ -719,11 +689,25 @@ class PVNet:
                                 tot_train_value_loss = 0
                                 train_steps_since_last_val_step = 0
 
+        # Finalize logging at the end
+        train_logger.log(
+        epoch=epoch,
+            steps=steps,
+            avg_train_loss=avg_train_loss,
+            avg_val_loss=avg_val_loss,
+            avg_train_policy_loss=avg_train_policy_loss,
+            avg_train_value_loss=avg_train_value_loss,
+            avg_val_policy_loss=avg_val_policy_loss,
+            avg_val_value_loss=avg_val_value_loss,
+            policy_done=policy_done,
+            value_done=value_done,
+            final=True
+        )
+
         self.policy_net.load_state_dict(policy_early_stopping.best_params)
         self.value_net.load_state_dict(value_early_stopping.best_params)
 
-        print(f"e: {epoch} | tl | {avg_train_loss} | vl: {avg_val_loss} | tpl: {avg_train_policy_loss} | tvl: {avg_train_value_loss} | vpl: {avg_val_policy_loss} | vvl: {avg_val_value_loss} | pdn: {policy_done} | vdn: {value_done}")
-        print("training done")
+        logger.info("training done")
         return avg_train_loss, avg_val_loss
 
     def save(self, folder):
@@ -909,6 +893,15 @@ class MCTSAgent:
     def train(self, buffer, batch_size):
         return self.mcts.pvnet.train(buffer, batch_size)
     
+    def pickle(self, path):
+        with open(path, "wb") as file:
+            pickle.dump(self, file)
+
+    @staticmethod
+    def load_from_pickle(path):
+        with open(path, "rb") as file:
+            return pickle.load(file)
+
 if __name__ == "__main__":
     pvnet = torch.load("checkpoints2/4.pt")
     with open(f"checkpoints2/4.pkl", "rb") as file:
