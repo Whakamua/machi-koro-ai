@@ -14,7 +14,7 @@ import itertools
 import copy
 import mlflow
 import os
-from env import GymMachiKoro, MachiKoro
+from env_machi_koro_2 import GymMachiKoro2
 import logging
 
 logger = logging.getLogger("SelfPlayFileLogger")
@@ -386,7 +386,7 @@ class ValueNet(nn.Module):
 class PVNet:
     def __init__(
             self,
-            env: GymMachiKoro,
+            env: GymMachiKoro2,
             uniform_pvnet: bool = False,
             custom_policy_edit: bool = False,
             custom_value: bool = False,
@@ -855,7 +855,7 @@ class PVNet:
 class MCTSAgent:
     def __init__(
             self,
-            env: GymMachiKoro,
+            env: GymMachiKoro2,
             num_mcts_sims: int,
             c_puct: float,
             pvnet: PVNet,
@@ -901,20 +901,3 @@ class MCTSAgent:
     def load_from_pickle(path):
         with open(path, "rb") as file:
             return pickle.load(file)
-
-if __name__ == "__main__":
-    pvnet = torch.load("checkpoints2/4.pt")
-    with open(f"checkpoints2/4.pkl", "rb") as file:
-        buffer = pickle.load(file)
-
-    env = MachiKoro(n_players=2)
-    env = GymMachiKoro(env)
-    observation, info = env.reset()
-
-    agent = MCTSAgent(env=env, num_mcts_sims=100, c_puct=2, pvnet=pvnet, dirichlet_to_root_node=True)
-    agent.reset(info["state"])
-
-    # pred = self.predict(buffer[-100][0], flattened=True)
-    breakpoint()
-    pred = agent.compute_action(observation=observation)
-    probs_preds, value_preds = self.forward(torch.tensor(buffer.obss[0:1000]).to(torch.float32))

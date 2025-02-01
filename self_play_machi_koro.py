@@ -19,6 +19,11 @@ from mcts_agent import NotEnoughDataError
 from collections import deque
 import logging
 
+# TODO
+# 1. Make sure that when starting from checkpoint, that the games that got played already do not go 
+#    to waste.
+# 2. Log the games played in the pit.
+
 def setup_logger(logging_file_path: str):
     """Sets up a centralized logger to log to both the console and a file."""
     logger = logging.getLogger("SelfPlayFileLogger")
@@ -43,21 +48,6 @@ def seed_all(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
-GAME_STATE_EMPTY_DECKS = np.array([ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-        0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  3,  0,  0,
-        0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-        0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  3,  0,  -1, -1,
-        -1,  -1,  -1,  -1,  -1, -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1, -1, -1,  -1,
-        -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
-        -1,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-       -1, -1, -1, -1, -1, -1, -1, -1, -1,  -1,  -1,  -1, -1,  -1,  -1,  -1,  -1,
-        -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1, -1, -1, -1, -1, -1, -1, -1,
-       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-       -1, -1, -1, -1,  -1,  0, -1,  0,  -1,  0,  -1,  0, -1,  0, -1,  0, -1,
-        0, -1,  0,  -1,  0, -1,  0, -1,  0, -1,  0,  0,  0])
 
 class SelfPlayLogger:
     def __init__(self, checkpoint_dir: str, env, hyperparams):
@@ -416,7 +406,8 @@ def create_ray_actor_pool():
     )
 
 def main(checkpoint_dir=None):
-    
+    # setting up the checkpoint directory, if a checkpoint directory is provided, that checkpoint 
+    # is used a starting point.
     if checkpoint_dir is None:
         starting_from_checkpoint = False
         checkpoint_dir = "checkpoints/" + str(datetime.datetime.now())
@@ -425,21 +416,21 @@ def main(checkpoint_dir=None):
         starting_from_checkpoint = True
 
     setup_logger(checkpoint_dir + "/selfplay.log")
-
     logger = logging.getLogger("SelfPlayFileLogger")
-
     if starting_from_checkpoint:
         logger.info(f"Starting self play from checkpoint {checkpoint_dir}")
     else:
         logger.info("Starting self play...")
 
+    # hyperparameters are not tuned, so is likely not optimal
     hyperparams = {
-        "MCTS_SIMULATIONS": 10,
+        "MCTS_SIMULATIONS": 2000,
         "PUCT": 2,
         "PVNET_TRAIN_EPOCHS": 30,
         "BATCH_SIZE": 64,
-        "GAMES_PER_ITERATION": 25,
+        "GAMES_PER_ITERATION": 2500,
         # "CARD_INFO_PATH": "card_info_machi_koro_2.yaml",
+        # Using a quick game setting where cards cost less so that a game is won faster.
         "CARD_INFO_PATH": "card_info_machi_koro_2_quick_game.yaml",
         "TRAIN_VAL_SPLIT": 0.2,
         "LR": 0.001,
@@ -453,10 +444,7 @@ def main(checkpoint_dir=None):
     if use_ray:
         ray.init()
 
-    env_cls = GymMachiKoro2
-    env_kwargs = {"n_players": hyperparams["N_PLAYERS"], "card_info_path": hyperparams["CARD_INFO_PATH"]}
-    env = env_cls(**env_kwargs)
-
+    # actor pool to parallelize the self play games
     if use_ray:
             actor_pool = create_ray_actor_pool()
     else:
@@ -464,19 +452,25 @@ def main(checkpoint_dir=None):
             worker_id=0
         )
 
-    with SelfPlayLogger(checkpoint_dir=checkpoint_dir, env=env, hyperparams=hyperparams) as selfplaylogger:
-        current_agent_name = selfplaylogger.current_agent_name
-        current_agent = MCTSAgent(
-            env=env,
-            num_mcts_sims=hyperparams["MCTS_SIMULATIONS"],
-            c_puct=hyperparams["PUCT"],
-            pvnet=PVNet(env, mlflow_experiment_name=f"Self Play {int(time.time())}"),
-            dirichlet_to_root_node=True,
-        )
-        best_agent_name = selfplaylogger.best_agent_name
-        best_agent = copy.deepcopy(current_agent)
-        best_agent.pickle(f"{checkpoint_dir}/{best_agent_name}.pickle")
+    # setting up the environment and agents for self play
+    env_cls = GymMachiKoro2
+    env_kwargs = {"n_players": hyperparams["N_PLAYERS"], "card_info_path": hyperparams["CARD_INFO_PATH"]}
+    env = env_cls(**env_kwargs)
 
+    current_agent_name = selfplaylogger.current_agent_name
+    current_agent = MCTSAgent(
+        env=env,
+        num_mcts_sims=hyperparams["MCTS_SIMULATIONS"],
+        c_puct=hyperparams["PUCT"],
+        pvnet=PVNet(env, mlflow_experiment_name=f"Self Play {int(time.time())}"),
+        dirichlet_to_root_node=True,
+    )
+    best_agent_name = selfplaylogger.best_agent_name
+    best_agent = copy.deepcopy(current_agent)
+    best_agent.pickle(f"{checkpoint_dir}/{best_agent_name}.pickle")
+
+    with SelfPlayLogger(checkpoint_dir=checkpoint_dir, env=env, hyperparams=hyperparams) as selfplaylogger:
+        # overwriting the agents, env and hyperparams from the checkpoint.
         if starting_from_checkpoint:
             selfplaylogger.load_logger_state()
             current_agent_name = selfplaylogger.current_agent_name
@@ -486,7 +480,11 @@ def main(checkpoint_dir=None):
             env = selfplaylogger.env
             hyperparams = selfplaylogger.hyperparams
 
+        # main loop for self play
         for i in range(100):
+            # setting up the agents for the current iteration, the current agent is the agent that
+            # is being trained, and the best agent is a static agent considered the best agent so 
+            # far.
             training_agents = {
                 0: {"name": selfplaylogger.current_agent_name, "agent": current_agent},
                 1: {"name": selfplaylogger.best_agent_name, "agent": best_agent},
@@ -516,6 +514,8 @@ def main(checkpoint_dir=None):
             else:
                 actor_generator = (actor.play_game(v, env, hyperparams["GAME_START_STATE"], training_agents, buffer) for v in game_ids)
 
+            # the actor generator will generate GAMES_PER_ITERATION number of games, all 
+            # information about the games are logged in the selfplaylogger into an hdf5 file.
             try:
                 for filled_buffer, game_time_taken, game_id, winner in actor_generator:
                     selfplaylogger.log_game(filled_buffer, game_time_taken, game_id, winner)
@@ -530,6 +530,11 @@ def main(checkpoint_dir=None):
                 logger.info(f"completed games this iteration is 0, pitting is not possible, skipping pitting computation and model trainig")
                 continue
             
+            # When the win ratio of the current_agent is above 55% it is considered a better agent
+            # and replaces the best_agent.
+            # When there has been no iteration since the last agent update, the current_agent would
+            # be equivalent to the best_agent, and therefore the > 55% win ratio would have been 
+            # luck, so the agent is not updated.
             current_agent_win_ratio = selfplaylogger.current_agent_win_ratio_current_iteration()
             if current_agent_win_ratio > 0.55 and selfplaylogger.iterations_since_new_best_agent > 0:
                 logger.info(f"new best agent found in iteration {selfplaylogger.iteration}, win ratio: {current_agent_win_ratio}")
@@ -546,6 +551,10 @@ def main(checkpoint_dir=None):
                 best_agent = copy.deepcopy(current_agent)
                 best_agent_name = copy.deepcopy(current_agent_name)
                 
+                # When a new best agent is found, all training data collected previously is 
+                # disregarded, the worry is that because prior data was collected with weaker
+                # agents, dilluting the higher quality training data. No testing has been done 
+                # however to verify this.
                 subset_rules = selfplaylogger.agents[current_agent_name]["subset_rules"]
                 for i, iteration in enumerate(subset_rules.keys()):
                     if i < len(subset_rules) - 1:
@@ -556,6 +565,9 @@ def main(checkpoint_dir=None):
             else:
                 logger.info(f"current agent win ratio: {current_agent_win_ratio}")
 
+            selfplaylogger.log_summary(final=True)
+            
+            # training the current agent with the data collected in the current iteration
             try:
                 current_agent.mcts.pvnet.train_hdf5(
                     batch_size=hyperparams["BATCH_SIZE"],
@@ -573,7 +585,6 @@ def main(checkpoint_dir=None):
                 logger.info("Not enough data to train model, skipping training")
 
             selfplaylogger.log_agent_update(current_agent_name, best_agent_name)
-            selfplaylogger.log_summary(final=True)
             selfplaylogger.save_logger_state()
 
 

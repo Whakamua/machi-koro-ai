@@ -1,10 +1,8 @@
 import gym
 import yaml
-from collections import deque
 import random
 import copy
 import numpy as np
-from collections import OrderedDict
 from typing import Optional
 
 class MachiKoro2:
